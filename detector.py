@@ -43,6 +43,18 @@ class PhoneDetector:
         # State for frame skipping
         self.last_display_data = [] # List of (x1, y1, x2, y2, color, status)
 
+        # Async Saving Queue
+        self.save_queue = []
+        self.save_thread_lock = threading.Lock()
+
+    def _save_evidence_async_worker(self, evidence_img, filename):
+        """Worker to save image in background"""
+        try:
+            cv2.imwrite(filename, evidence_img)
+            print(f"📸 EVIDENCE SAVED: {filename}")
+        except Exception as e:
+            print(f"Error saving evidence: {e}")
+
     def process_frame(self, frame, frame_count, skip_frames=5, save_screenshots=True, conf_threshold=0.25, camera_name="Unknown"):
         """
         Process the frame.
@@ -71,12 +83,21 @@ class PhoneDetector:
             # 1. First Pass: Find People in the full room
             # We filter for PERSON class (0) only
             
+            # OPTIMIZATION: Resize frame for inference if it's huge (e.g. 4k)
+            # YOLO works best on 640. Standard webcams are 720p or 1080p.
+            # We pass the full frame but let YOLO handle resizing internally usually.
+            # However, explictly ensuring we don't pass massive arrays can help.
+            # For now, we trust Ultralytics auto-resize but we ensure half-precision if supported.
+
             # Thread-safe inference
+            # We use `half=True` (FP16) if possible, but it requires CUDA. CPU runs FP32.
+            # Ultralytics handles this automatically if device=0.
+
             if self.lock:
                 with self.lock:
-                    results = self.model.predict(frame, classes=[self.PERSON_CLASS_ID], conf=conf_threshold, verbose=False)
+                    results = self.model.predict(frame, classes=[self.PERSON_CLASS_ID], conf=conf_threshold, verbose=False, imgsz=640)
             else:
-                results = self.model.predict(frame, classes=[self.PERSON_CLASS_ID], conf=conf_threshold, verbose=False)
+                results = self.model.predict(frame, classes=[self.PERSON_CLASS_ID], conf=conf_threshold, verbose=False, imgsz=640)
             
             # Use cpu().numpy() or .tolist() to get coordinates
             if len(results) > 0:
@@ -279,5 +300,6 @@ class PhoneDetector:
         
         # Add detection type to filename
         filename = os.path.join(self.output_dir, f"evidence_{detection_type.lower()}_{safe_cam_name}_{timestamp_fn}.jpg")
-        cv2.imwrite(filename, evidence_img)
-        print(f"📸 EVIDENCE SAVED: {filename}")
+
+        # Launch background thread for saving
+        threading.Thread(target=self._save_evidence_async_worker, args=(evidence_img, filename), daemon=True).start()
