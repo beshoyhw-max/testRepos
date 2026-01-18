@@ -76,7 +76,7 @@ class PhoneDetector:
             if len(results) > 0:
                 boxes = results[0].boxes
                 
-                for box in boxes:
+                for idx, box in enumerate(boxes):
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     p_cx, p_cy = (x1 + x2) / 2, (y1 + y2) / 2
                     
