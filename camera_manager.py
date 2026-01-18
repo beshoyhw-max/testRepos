@@ -7,8 +7,93 @@ import datetime
 from detector import PhoneDetector
 from ultralytics import YOLO
 
+# Force TCP connection (critical for Huawei cameras and general RTSP stability)
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+
 # Shared Lock for Model Inference to prevent race conditions/OOM if using GPU
 model_lock = threading.Lock()
+
+class VideoReader:
+    """
+    Dedicated thread for reading frames from a video source.
+    Ensures that we always have the latest frame available, discarding older ones.
+    Solves the producer-consumer lag issue.
+    """
+    def __init__(self, source, camera_name="Unknown"):
+        self.source = source
+        self.camera_name = camera_name
+
+        self.cap = None
+        self.frame = None
+        self.last_read_time = 0
+        self.running = False
+        self.connected = False
+
+        # Start reading thread
+        self.thread = threading.Thread(target=self.update, args=(), daemon=True)
+
+    def start(self):
+        self.running = True
+        self.thread.start()
+
+    def stop(self):
+        self.running = False
+        if self.thread.is_alive():
+            self.thread.join(timeout=1.0)
+        if self.cap:
+            self.cap.release()
+
+    def update(self):
+        print(f"[{self.camera_name}] VideoReader started for source: {self.source}")
+
+        while self.running:
+            if self.cap is None or not self.cap.isOpened():
+                self.connected = False
+                print(f"[{self.camera_name}] Connecting to source...")
+                self.cap = cv2.VideoCapture(self.source)
+
+                # Optimize for webcam
+                if isinstance(self.source, int) or (isinstance(self.source, str) and self.source.isdigit()):
+                    self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                    self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+                # Critical for low latency
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+
+                if not self.cap.isOpened():
+                    print(f"[{self.camera_name}] Connection failed. Retrying in 5s...")
+                    time.sleep(5)
+                    continue
+
+                print(f"[{self.camera_name}] Connected.")
+                self.connected = True
+
+            # Read frame
+            try:
+                ret, frame = self.cap.read()
+                if ret:
+                    self.frame = frame
+                    self.last_read_time = time.time()
+                else:
+                    # Stream lost or end of file
+                    print(f"[{self.camera_name}] Stream read failed.")
+                    self.cap.release()
+                    self.connected = False
+                    time.sleep(0.5) # Wait before retry
+            except Exception as e:
+                print(f"[{self.camera_name}] Error reading frame: {e}")
+                self.connected = False
+                if self.cap:
+                    self.cap.release()
+                time.sleep(1)
+
+    def get_frame(self):
+        return self.frame, self.last_read_time
+
+    def is_connected(self):
+        # Consider connected if we read a frame recently
+        return self.connected and (time.time() - self.last_read_time < 3.0)
+
 
 class CameraThread(threading.Thread):
     def __init__(self, camera_config, shared_model, shared_pose_model, conf_threshold=0.25):
@@ -20,7 +105,6 @@ class CameraThread(threading.Thread):
         self.shared_pose_model = shared_pose_model
         
         # Initialize independent detector state for this camera
-        # We pass the shared model to it (requires update in detector.py)
         self.detector = PhoneDetector(
             model_instance=self.shared_model,
             pose_model_instance=self.shared_pose_model,
@@ -29,82 +113,75 @@ class CameraThread(threading.Thread):
         
         self.conf_threshold = conf_threshold
         self.running = False
-        self.latest_frame = None
+        self.latest_processed_frame = None
         self.status = "safe"
-        self.is_connected = False
         self.last_update_time = 0
+        self.last_processed_timestamp = 0
+
+        # Initialize VideoReader
+        self.reader = VideoReader(self.source, self.camera_name)
         
     def run(self):
         self.running = True
-        print(f"[{self.camera_name}] Starting thread...")
+        print(f"[{self.camera_name}] Starting processing thread...")
+        self.reader.start()
+
+        frame_count = 0
         
         while self.running:
-            # Reconnect loop
-            cap = cv2.VideoCapture(self.source)
-            # Try to optimize resolution if it's a webcam (int source)
-            if isinstance(self.source, int) or (isinstance(self.source, str) and self.source.isdigit()):
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-                
-            if not cap.isOpened():
-                print(f"[{self.camera_name}] Failed to open source. Retrying in 5s...")
-                self.is_connected = False
-                self.status = "error"
-                time.sleep(5)
+            # Check connection status
+            if not self.reader.is_connected():
+                self.status = "disconnected"
+                time.sleep(0.5)
                 continue
-                
-            self.is_connected = True
-            print(f"[{self.camera_name}] Connected.")
             
-            frame_count = 0
-            # Enterprise Governor: Sleep slightly to allow other threads to run
-            # We can tune this dynamic sleep later.
+            # Get latest frame from reader
+            raw_frame, timestamp = self.reader.get_frame()
             
-            while self.running and cap.isOpened():
-                ret, frame = cap.read()
-                if not ret:
-                    print(f"[{self.camera_name}] Stream lost.")
-                    break
-                
-                # Run Detection
-                # We handle the frame skipping inside the thread loop or inside the detector.
-                # Let's do it here to save locking overhead.
-                SKIP_FRAMES = 3
-                
-                try:
-                    # process_frame now returns (frame, status_string, is_saved)
-                    processed_frame, status, is_saved = self.detector.process_frame(
-                        frame, 
-                        frame_count, 
-                        skip_frames=SKIP_FRAMES, 
-                        save_screenshots=True, # We can make this configurable
-                        conf_threshold=self.conf_threshold,
-                        camera_name=self.camera_name # For file naming
-                    )
-                    
-                    self.latest_frame = processed_frame
-                    self.status = status
-                    self.last_update_time = time.time()
-                    
-                except Exception as e:
-                    print(f"[{self.camera_name}] Error in processing: {e}")
-                
-                frame_count += 1
-                
-                # Small sleep to prevent CPU hogging
+            # Skip if no frame or if we already processed this frame
+            if raw_frame is None or timestamp == self.last_processed_timestamp:
+                # Frame not ready or duplicate
                 time.sleep(0.01)
+                continue
+
+            self.last_processed_timestamp = timestamp
+
+            # Process Frame
+            # process_frame returns (frame, status_string, is_saved)
+            # We process EVERY frame we get from the reader (which is already skipping frames naturally)
+            # But we still pass frame_count to detector for its internal consistency checks (skip_frames arg)
+
+            try:
+                processed_frame, status, is_saved = self.detector.process_frame(
+                    raw_frame,
+                    frame_count,
+                    skip_frames=3, # Still skip internally if needed for performance
+                    save_screenshots=True,
+                    conf_threshold=self.conf_threshold,
+                    camera_name=self.camera_name
+                )
+
+                self.latest_processed_frame = processed_frame
+                self.status = status
+                self.last_update_time = time.time()
                 
-            cap.release()
-            self.is_connected = False
+            except Exception as e:
+                print(f"[{self.camera_name}] Error in processing: {e}")
             
-        print(f"[{self.camera_name}] Thread stopped.")
+            frame_count += 1
+
+            # Small sleep to prevent CPU hogging in this loop
+            time.sleep(0.01)
+
+        print(f"[{self.camera_name}] Processing thread stopped.")
+        self.reader.stop()
 
     def stop(self):
         self.running = False
         self.join()
 
     def get_frame(self):
-        return self.latest_frame
+        return self.latest_processed_frame
 
     def get_status(self):
         # If data is stale (> 3 seconds), consider it disconnected
