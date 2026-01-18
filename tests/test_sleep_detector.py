@@ -52,6 +52,15 @@ class TestSleepDetector(unittest.TestCase):
     def test_03_posture_logic_mock(self):
         if not self.detector: self.skipTest("Detector not loaded")
 
+        # --- NEW REQUIREMENT: MediaPipe Must FAIL for Pose to Run ---
+        original_mp = self.detector.detector
+        mock_mp = MagicMock()
+        # Return empty list for landmarks -> "No Face"
+        mock_detection = MagicMock()
+        mock_detection.face_landmarks = []
+        mock_mp.detect.return_value = mock_detection
+        self.detector.detector = mock_mp
+
         # Mock the YOLO model
         original_model = self.detector.pose_model
         mock_model = MagicMock()
@@ -91,70 +100,56 @@ class TestSleepDetector(unittest.TestCase):
 
         self.assertEqual(status, "sleeping")
         self.assertEqual(info["reason"], "posture")
+        self.assertEqual(info["source"], "yolo-pose")
 
         # Restore
         self.detector.pose_model = original_model
+        self.detector.detector = original_mp
 
-    def test_04_state_machine(self):
+    def test_04_state_machine_mediapipe_first(self):
         if not self.detector: self.skipTest("Detector not loaded")
 
-        # We need to mock _calculate_ear to return low value consistently
-        # But _calculate_ear is a method.
-        # We can mock the logic inside process_crop by mocking the detector result?
-        # Easier: Mock `_calculate_ear` method on the instance.
-
-        original_calc = self.detector._calculate_ear
-        self.detector._calculate_ear = MagicMock(return_value=0.10) # Eyes Closed
-
-        # We also need to bypass Pose check (return no keypoints or "awake" pose)
-        # If we pass an empty crop, it returns awake instantly.
-        # We need a crop that passes pose check but fails eye check.
-        # We can mock pose_model again.
-
-        original_pose = self.detector.pose_model
-        mock_pose = MagicMock()
-        mock_result = MagicMock()
-        mock_result.keypoints = None # No body detected, so it falls through to Face check?
-        # Wait, if no body, does it do face?
-        # Logic: process_crop takes a crop. It checks pose on that crop.
-        # If no keypoints, it falls through to "is_posture_sleep = False".
-        # Then it tries MediaPipe.
-
-        mock_pose.predict.return_value = [mock_result]
-        self.detector.pose_model = mock_pose
-
-        # We also need MediaPipe to return a "face".
-        # Mocking `detector.detect`
+        # Mock MediaPipe Success (Face Found)
         original_mp = self.detector.detector
         mock_mp = MagicMock()
         mock_detection = MagicMock()
-        mock_landmarks = MagicMock()
-        # process_crop accesses detection_result.face_landmarks[0]
+        mock_landmarks = MagicMock() # Needs actual data structure if real logic runs
+        # We bypass logic by mocking _calculate_ear
+
         mock_detection.face_landmarks = [mock_landmarks]
         mock_mp.detect.return_value = mock_detection
         self.detector.detector = mock_mp
 
+        # Mock EAR calculation
+        original_calc = self.detector._calculate_ear
+        self.detector._calculate_ear = MagicMock(return_value=0.10) # Eyes Closed
+
+        # Mock Pose to ensure it is NOT called
+        original_pose = self.detector.pose_model
+        mock_pose = MagicMock()
+        self.detector.pose_model = mock_pose
+
         dummy_crop = np.zeros((100, 100, 3), dtype=np.uint8)
 
-        # T=0
-        status, _ = self.detector.process_crop(dummy_crop, id_key="test_state")
-        self.assertEqual(status, "drowsy") # First frame closed = drowsy (or blink)
+        # Run
+        status, info = self.detector.process_crop(dummy_crop, id_key="test_state")
 
-        # T=1.0 (Sleep time in code is 2.0)
-        time.sleep(1.0)
-        status, _ = self.detector.process_crop(dummy_crop, id_key="test_state")
+        # Verify Pose was NOT called
+        mock_pose.predict.assert_not_called()
+
         self.assertEqual(status, "drowsy")
+        self.assertEqual(info["source"], "mediapipe")
 
-        # T=2.1
-        time.sleep(1.2)
+        # Verify State Persistence (T=2.1s later)
+        time.sleep(2.1)
         status, info = self.detector.process_crop(dummy_crop, id_key="test_state")
         self.assertEqual(status, "sleeping")
-        self.assertGreater(info["duration"], 2.0)
+        self.assertEqual(info["source"], "mediapipe")
 
         # Reset
-        self.detector.pose_model = original_pose
         self.detector.detector = original_mp
         self.detector._calculate_ear = original_calc
+        self.detector.pose_model = original_pose
 
 if __name__ == '__main__':
     unittest.main()
