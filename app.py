@@ -33,6 +33,24 @@ st.markdown("""
         font-weight: bold;
         margin-bottom: 10px;
     }
+    .warn-box {
+        background-color: #ffa500;
+        color: white;
+        padding: 10px;
+        border-radius: 5px;
+        text-align: center;
+        font-weight: bold;
+        margin-bottom: 10px;
+    }
+    .sleep-box {
+        background-color: #800080;
+        color: white;
+        padding: 10px;
+        border-radius: 5px;
+        text-align: center;
+        font-weight: bold;
+        margin-bottom: 10px;
+    }
     div[data-testid="stImage"] img {
         border-radius: 5px;
     }
@@ -71,18 +89,30 @@ with tab1:
     active_cams = manager.get_active_cameras()
     
     # Check for any active alerts across all cameras
-    any_alert = False
-    alert_cam_names = []
+    active_alert_types = [] # List of (type, cam_name)
     
     for cam in active_cams.values():
-        if cam.get_status() == "texting":
-            any_alert = True
-            alert_cam_names.append(cam.camera_name)
+        status = cam.get_status()
+        if status in ["texting", "sleeping", "head_down"]:
+            active_alert_types.append((status, cam.camera_name))
     
     alert_placeholder = st.empty()
-    if any_alert:
-        names_str = ", ".join(alert_cam_names)
-        alert_placeholder.markdown(f'<div class="alert-box">⚠️ ALERT: PHONE DETECTED IN: {names_str}</div>', unsafe_allow_html=True)
+
+    if active_alert_types:
+        # Prioritize alerts: Phone > Sleep > Head Down
+        phones = [n for t, n in active_alert_types if t == "texting"]
+        sleepers = [n for t, n in active_alert_types if t == "sleeping"]
+        heads = [n for t, n in active_alert_types if t == "head_down"]
+
+        if phones:
+            names_str = ", ".join(phones)
+            alert_placeholder.markdown(f'<div class="alert-box">⚠️ ALERT: PHONE DETECTED IN: {names_str}</div>', unsafe_allow_html=True)
+        elif sleepers:
+            names_str = ", ".join(sleepers)
+            alert_placeholder.markdown(f'<div class="sleep-box">💤 ALERT: SLEEPING DETECTED IN: {names_str}</div>', unsafe_allow_html=True)
+        elif heads:
+            names_str = ", ".join(heads)
+            alert_placeholder.markdown(f'<div class="warn-box">📉 ALERT: HEAD DOWN IN: {names_str}</div>', unsafe_allow_html=True)
     else:
         alert_placeholder.empty()
 
@@ -131,8 +161,7 @@ with tab1:
         if run_monitor:
             while True:
                 # Update all cameras
-                any_alert_loop = False
-                alert_names_loop = []
+                loop_alerts = [] # (type, name)
                 
                 for cam_id, container in cam_containers.items():
                     thread = container["thread"]
@@ -140,13 +169,16 @@ with tab1:
                     status = thread.get_status()
                     
                     # Update Alert Logic
-                    if status == "texting":
-                        any_alert_loop = True
-                        alert_names_loop.append(thread.camera_name)
+                    if status in ["texting", "sleeping", "head_down"]:
+                        loop_alerts.append((status, thread.camera_name))
                     
                     # Update Status Text
                     if status == "texting":
-                        container["status"].markdown(":red[**DETECTED**]")
+                        container["status"].markdown(":red[**PHONE DETECTED**]")
+                    elif status == "sleeping":
+                        container["status"].markdown(":violet[**SLEEPING**]")
+                    elif status == "head_down":
+                        container["status"].markdown(":orange[**HEAD DOWN**]")
                     elif status == "safe":
                         container["status"].markdown(":green[**SAFE**]")
                     elif status == "disconnected":
@@ -165,9 +197,20 @@ with tab1:
                         container["frame"].info("No Signal")
                 
                 # Update Global Alert inside loop
-                if any_alert_loop:
-                    names_str = ", ".join(alert_names_loop)
-                    alert_placeholder.markdown(f'<div class="alert-box">⚠️ ALERT: PHONE DETECTED IN: {names_str}</div>', unsafe_allow_html=True)
+                if loop_alerts:
+                    phones = [n for t, n in loop_alerts if t == "texting"]
+                    sleepers = [n for t, n in loop_alerts if t == "sleeping"]
+                    heads = [n for t, n in loop_alerts if t == "head_down"]
+
+                    if phones:
+                        names_str = ", ".join(phones)
+                        alert_placeholder.markdown(f'<div class="alert-box">⚠️ ALERT: PHONE DETECTED IN: {names_str}</div>', unsafe_allow_html=True)
+                    elif sleepers:
+                        names_str = ", ".join(sleepers)
+                        alert_placeholder.markdown(f'<div class="sleep-box">💤 ALERT: SLEEPING DETECTED IN: {names_str}</div>', unsafe_allow_html=True)
+                    elif heads:
+                        names_str = ", ".join(heads)
+                        alert_placeholder.markdown(f'<div class="warn-box">📉 ALERT: HEAD DOWN IN: {names_str}</div>', unsafe_allow_html=True)
                 else:
                     alert_placeholder.empty()
                 
