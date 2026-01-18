@@ -117,6 +117,7 @@ class CameraThread(threading.Thread):
         self.status = "safe"
         self.last_update_time = 0
         self.last_processed_timestamp = 0
+        self.skip_frames = 3 # Default
 
         # Initialize VideoReader
         self.reader = VideoReader(self.source, self.camera_name)
@@ -155,7 +156,7 @@ class CameraThread(threading.Thread):
                 processed_frame, status, is_saved = self.detector.process_frame(
                     raw_frame,
                     frame_count,
-                    skip_frames=3, # Still skip internally if needed for performance
+                    skip_frames=self.skip_frames,
                     save_screenshots=True,
                     conf_threshold=self.conf_threshold,
                     camera_name=self.camera_name
@@ -278,3 +279,7 @@ class CameraManager:
     def update_global_conf(self, conf):
         for cam in self.cameras.values():
             cam.conf_threshold = conf
+
+    def update_global_skip(self, skip):
+        for cam in self.cameras.values():
+            cam.skip_frames = skip

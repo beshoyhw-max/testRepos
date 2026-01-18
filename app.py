@@ -66,6 +66,11 @@ conf_threshold = st.sidebar.slider("Sensitivity (Confidence)", 0.1, 1.0, 0.25)
 # Update manager config whenever this changes
 manager.update_global_conf(conf_threshold)
 
+# Performance Controls
+with st.sidebar.expander("🚀 Performance Tuning"):
+    skip_frames = st.slider("Frame Skip (Higher = Lower CPU)", 1, 30, 5, help="Process 1 out of every N frames.")
+    manager.update_global_skip(skip_frames)
+
 st.sidebar.markdown("---")
 st.sidebar.info(f"Active Cameras: {len(manager.get_active_cameras())}")
 
