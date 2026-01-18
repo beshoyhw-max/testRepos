@@ -170,6 +170,19 @@ class PhoneDetector:
                             color = (255, 0, 0) # Blue (BGR) -> Red is (0,0,255). Blue is (255,0,0).
                             if global_status != "texting":
                                 global_status = "sleeping"
+
+                            # Attempt Save for Sleep
+                            if save_screenshots:
+                                should_save_sleep = True
+                                for (sx, sy, stime) in self.screenshot_locations:
+                                    if math.sqrt((p_cx - sx)**2 + (p_cy - sy)**2) < 100:
+                                        should_save_sleep = False; break
+
+                                if should_save_sleep:
+                                    self.screenshot_locations.append((p_cx, p_cy, current_time))
+                                    self.save_evidence(frame, x1, y1, x2, y2, camera_name, label="SLEEPING")
+                                    screenshot_saved_global = True
+
                         elif sleep_status == "drowsy":
                             # Warning color
                             color = (0, 255, 255) # Yellow
@@ -201,18 +214,19 @@ class PhoneDetector:
 
         return frame, global_status, screenshot_saved_global
 
-    def save_evidence(self, frame, x1, y1, x2, y2, camera_name="Unknown"):
+    def save_evidence(self, frame, x1, y1, x2, y2, camera_name="Unknown", label="PHONE"):
         evidence_img = frame.copy()
         
         # Draw the box on the evidence
-        cv2.rectangle(evidence_img, (x1, y1), (x2, y2), (0, 0, 255), 3)
+        color = (0, 0, 255) if label == "PHONE" else (255, 0, 0)
+        cv2.rectangle(evidence_img, (x1, y1), (x2, y2), color, 3)
         
         # Add Header
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # Draw black bar at top
         cv2.rectangle(evidence_img, (0, 0), (evidence_img.shape[1], 40), (0,0,0), -1)
         # Add text
-        header_text = f"PHONE | {camera_name} | {ts}"
+        header_text = f"{label} | {camera_name} | {ts}"
         cv2.putText(evidence_img, header_text, (10, 25), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
