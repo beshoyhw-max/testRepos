@@ -132,9 +132,22 @@ with tab1:
         # In Streamlit, the whole script reruns on interaction. 
         # To get video, we need a while loop inside this tab logic.
         
-        run_monitor = st.checkbox("Start Live Monitor", value=True)
+        # Use a unique key to persist state across tab switches
+        run_monitor = st.checkbox("Start Live Monitor", value=True, key="run_live_monitor")
+
+        # Only run the loop if the checkbox is checked AND we are arguably looking at this tab?
+        # Actually, Streamlit runs top-to-bottom. If we are on Tab 2, we still execute this block.
+        # If the loop runs, we never reach Tab 2 code.
+        # We must BREAK the loop if the user interacts with something else (like changing tabs).
+        # But Streamlit doesn't give us a "tab changed" event easily inside the loop.
+        # However, checking the checkbox state is the primary control.
         
         if run_monitor:
+            placeholder = st.empty()
+            with placeholder.container():
+                # We use a placeholder to allow clearing if needed, though not strictly necessary for the loop
+                pass
+
             while True:
                 # Update all cameras
                 loop_texting = []
