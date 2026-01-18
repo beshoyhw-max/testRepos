@@ -71,18 +71,24 @@ with tab1:
     active_cams = manager.get_active_cameras()
     
     # Check for any active alerts across all cameras
-    any_alert = False
-    alert_cam_names = []
+    alert_texting = []
+    alert_sleeping = []
     
     for cam in active_cams.values():
-        if cam.get_status() == "texting":
-            any_alert = True
-            alert_cam_names.append(cam.camera_name)
+        status = cam.get_status()
+        if status == "texting":
+            alert_texting.append(cam.camera_name)
+        elif status == "sleeping":
+            alert_sleeping.append(cam.camera_name)
     
     alert_placeholder = st.empty()
-    if any_alert:
-        names_str = ", ".join(alert_cam_names)
+    if alert_texting:
+        names_str = ", ".join(alert_texting)
         alert_placeholder.markdown(f'<div class="alert-box">⚠️ ALERT: PHONE DETECTED IN: {names_str}</div>', unsafe_allow_html=True)
+    elif alert_sleeping:
+        names_str = ", ".join(alert_sleeping)
+        # Blue/Purple box for sleep
+        alert_placeholder.markdown(f'<div class="alert-box" style="background-color: #6a0dad;">💤 ALERT: SLEEP DETECTED IN: {names_str}</div>', unsafe_allow_html=True)
     else:
         alert_placeholder.empty()
 
@@ -131,8 +137,8 @@ with tab1:
         if run_monitor:
             while True:
                 # Update all cameras
-                any_alert_loop = False
-                alert_names_loop = []
+                loop_texting = []
+                loop_sleeping = []
                 
                 for cam_id, container in cam_containers.items():
                     thread = container["thread"]
@@ -141,12 +147,15 @@ with tab1:
                     
                     # Update Alert Logic
                     if status == "texting":
-                        any_alert_loop = True
-                        alert_names_loop.append(thread.camera_name)
+                        loop_texting.append(thread.camera_name)
+                    elif status == "sleeping":
+                        loop_sleeping.append(thread.camera_name)
                     
                     # Update Status Text
                     if status == "texting":
-                        container["status"].markdown(":red[**DETECTED**]")
+                        container["status"].markdown(":red[**PHONE DETECTED**]")
+                    elif status == "sleeping":
+                        container["status"].markdown(":blue[**SLEEP DETECTED**]")
                     elif status == "safe":
                         container["status"].markdown(":green[**SAFE**]")
                     elif status == "disconnected":
@@ -165,9 +174,12 @@ with tab1:
                         container["frame"].info("No Signal")
                 
                 # Update Global Alert inside loop
-                if any_alert_loop:
-                    names_str = ", ".join(alert_names_loop)
+                if loop_texting:
+                    names_str = ", ".join(loop_texting)
                     alert_placeholder.markdown(f'<div class="alert-box">⚠️ ALERT: PHONE DETECTED IN: {names_str}</div>', unsafe_allow_html=True)
+                elif loop_sleeping:
+                    names_str = ", ".join(loop_sleeping)
+                    alert_placeholder.markdown(f'<div class="alert-box" style="background-color: #6a0dad;">💤 ALERT: SLEEP DETECTED IN: {names_str}</div>', unsafe_allow_html=True)
                 else:
                     alert_placeholder.empty()
                 
