@@ -15,7 +15,13 @@ class SleepDetector:
             self.pose_model = pose_model_instance
         else:
             print("Loading YOLO Pose...")
-            self.pose_model = YOLO(pose_model_path)
+            # Check for OpenVINO version first
+            ov_path = pose_model_path.replace('.pt', '_openvino_model/')
+            if os.path.exists(ov_path):
+                 print("Using OpenVINO Pose Model...")
+                 self.pose_model = YOLO(ov_path, task='pose')
+            else:
+                 self.pose_model = YOLO(pose_model_path)
 
         # 2. Load MediaPipe Face Landmarker
         print("Loading MediaPipe Face Landmarker...")

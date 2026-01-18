@@ -198,10 +198,24 @@ class CameraManager:
         self.shared_pose_model = None
         
         # Load Model Once
-        print("Loading Shared YOLO Model (Detection)...")
-        self.shared_model = YOLO('yolo11n.pt')
-        print("Loading Shared YOLO Model (Pose)...")
-        self.shared_pose_model = YOLO('yolo11n-pose.pt')
+        # OPTIMIZATION: Try loading OpenVINO models if available
+
+        det_model_path = 'yolo11n.pt'
+        if os.path.exists('yolo11n_openvino_model/'):
+            print("Loading OpenVINO Optimization (Detection)...")
+            det_model_path = 'yolo11n_openvino_model/'
+        else:
+            print("Loading Standard YOLO Model (Detection)...")
+
+        pose_model_path = 'yolo11n-pose.pt'
+        if os.path.exists('yolo11n-pose_openvino_model/'):
+            print("Loading OpenVINO Optimization (Pose)...")
+            pose_model_path = 'yolo11n-pose_openvino_model/'
+        else:
+            print("Loading Standard YOLO Model (Pose)...")
+
+        self.shared_model = YOLO(det_model_path, task='detect')
+        self.shared_pose_model = YOLO(pose_model_path, task='pose')
         print("Models Loaded.")
         
         self.load_config_and_start()
