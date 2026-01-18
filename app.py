@@ -115,8 +115,9 @@ with tab1:
             with cols[col_idx]:
                 cam = active_cams[cam_id]
                 st.subheader(f"📹 {cam.camera_name}")
-                status_text = st.empty()
+                # Place video FIRST, then status to prevent status text resizing from moving the video
                 frame_view = st.empty()
+                status_text = st.empty()
                 
                 # Add Fullscreen/Stop controls (State management in a loop is tricky in Streamlit, 
                 # usually requires callback buttons. We stick to simple view for now).
