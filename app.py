@@ -62,11 +62,19 @@ manager.update_global_conf(conf_threshold)
 st.sidebar.markdown("---")
 st.sidebar.info(f"Active Cameras: {len(manager.get_active_cameras())}")
 
-# --- Tabs ---
-tab1, tab2, tab3 = st.tabs(["🔴 Live Dashboard", "📸 Evidence Log", "⚙️ Configuration"])
+# --- Navigation ---
+# Using Radio Button instead of Tabs to ensure correct loop breaking
+page_selection = st.radio(
+    "Navigate",
+    ["🔴 Live Dashboard", "📸 Evidence Log", "⚙️ Configuration"],
+    horizontal=True,
+    label_visibility="collapsed"
+)
 
-# --- Tab 1: Live Dashboard ---
-with tab1:
+st.markdown("---")
+
+# --- Page 1: Live Dashboard ---
+if page_selection == "🔴 Live Dashboard":
     # 1. Global Alert System
     active_cams = manager.get_active_cameras()
     
@@ -135,13 +143,6 @@ with tab1:
         
         # Use a unique key to persist state across tab switches
         run_monitor = st.checkbox("Start Live Monitor", value=True, key="run_live_monitor")
-
-        # Only run the loop if the checkbox is checked AND we are arguably looking at this tab?
-        # Actually, Streamlit runs top-to-bottom. If we are on Tab 2, we still execute this block.
-        # If the loop runs, we never reach Tab 2 code.
-        # We must BREAK the loop if the user interacts with something else (like changing tabs).
-        # But Streamlit doesn't give us a "tab changed" event easily inside the loop.
-        # However, checking the checkbox state is the primary control.
         
         if run_monitor:
             placeholder = st.empty()
@@ -200,8 +201,8 @@ with tab1:
                 # Sleep to limit UI refresh rate (separate from detection rate)
                 time.sleep(0.1)
 
-# --- Tab 2: Evidence Log ---
-with tab2:
+# --- Page 2: Evidence Log ---
+elif page_selection == "📸 Evidence Log":
     st.subheader("Infraction History")
     
     if st.button("Refresh Gallery"):
@@ -224,8 +225,8 @@ with tab2:
                 # Display clean name
                 st.caption(os.path.basename(img_path))
 
-# --- Tab 3: Configuration ---
-with tab3:
+# --- Page 3: Configuration ---
+elif page_selection == "⚙️ Configuration":
     st.header("Camera Management")
     
     # List Existing
