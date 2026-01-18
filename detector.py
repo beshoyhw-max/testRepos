@@ -5,9 +5,10 @@ import math
 import datetime
 from ultralytics import YOLO
 import threading
+from sleep_detector import SleepDetector
 
 class PhoneDetector:
-    def __init__(self, model_path='yolo11s.pt', output_dir="detections", cooldown_seconds=5, consistency_threshold=3, model_instance=None, lock=None):
+    def __init__(self, model_path='yolo11s.pt', output_dir="detections", cooldown_seconds=5, consistency_threshold=3, model_instance=None, pose_model_instance=None, lock=None):
         
         self.output_dir = output_dir
         if not os.path.exists(self.output_dir):
@@ -20,6 +21,9 @@ class PhoneDetector:
         else:
             self.model = YOLO(model_path)
             
+        # Initialize Sleep Detector
+        self.sleep_detector = SleepDetector(pose_model_instance=pose_model_instance)
+
         self.PHONE_CLASS_ID = 67
         self.PERSON_CLASS_ID = 0
         self.COOLDOWN_SECONDS = cooldown_seconds
@@ -38,6 +42,7 @@ class PhoneDetector:
         """
         Process the frame.
         skip_frames: Run heavy inference only every N frames.
+        Returns: frame, global_status_string, screenshot_saved_bool
         """
         current_time = time.time()
         
@@ -47,7 +52,7 @@ class PhoneDetector:
             if (current_time - s[2]) < self.COOLDOWN_SECONDS
         ]
 
-        phone_detected_global = False
+        global_status = "safe" # safe, texting, sleeping
         screenshot_saved_global = False
 
         # --- HEAVY INFERENCE STEP ---
@@ -124,7 +129,7 @@ class PhoneDetector:
                                 if candidate['streak'] >= self.CONSISTENCY_THRESHOLD:
                                     status = "texting"
                                     color = (0, 0, 255) # Red
-                                    phone_detected_global = True
+                                    global_status = "texting"
                                     
                                     # Attempt Save
                                     if save_screenshots:
@@ -151,6 +156,23 @@ class PhoneDetector:
                             
                         # Mark this person as processed (so we don't prune their streak)
                         current_frame_detections.append((p_cx, p_cy))
+
+                    # --- SLEEP DETECTION (If not texting) ---
+                    if status != "texting" and person_crop.size > 0:
+                        # We use a simple ID key based on camera + index to persist state roughly
+                        # Ideally we would use tracking ID, but we don't have it yet.
+                        # Assumption: People don't swap seats often.
+                        sleep_key = f"{camera_name}_idx_{idx}"
+                        sleep_status, sleep_info = self.sleep_detector.process_crop(person_crop, id_key=sleep_key)
+
+                        if sleep_status == "sleeping":
+                            status = "sleeping"
+                            color = (255, 0, 0) # Blue (BGR) -> Red is (0,0,255). Blue is (255,0,0).
+                            if global_status != "texting":
+                                global_status = "sleeping"
+                        elif sleep_status == "drowsy":
+                            # Warning color
+                            color = (0, 255, 255) # Yellow
                             
                     # Store for display
                     self.last_display_data.append((x1, y1, x2, y2, color, status))
@@ -170,10 +192,14 @@ class PhoneDetector:
             if status == "texting":
                 cv2.putText(frame, "PHONE DETECTED", (x1, y1 - 10), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                # Keep the global flag true if we are still displaying the alert
-                phone_detected_global = True 
+                global_status = "texting" # Ensure drawing updates global status if cached
+            elif status == "sleeping":
+                cv2.putText(frame, "SLEEPING", (x1, y1 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                if global_status != "texting":
+                     global_status = "sleeping"
 
-        return frame, phone_detected_global, screenshot_saved_global
+        return frame, global_status, screenshot_saved_global
 
     def save_evidence(self, frame, x1, y1, x2, y2, camera_name="Unknown"):
         evidence_img = frame.copy()

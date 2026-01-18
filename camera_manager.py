@@ -11,16 +11,21 @@ from ultralytics import YOLO
 model_lock = threading.Lock()
 
 class CameraThread(threading.Thread):
-    def __init__(self, camera_config, shared_model, conf_threshold=0.25):
+    def __init__(self, camera_config, shared_model, shared_pose_model, conf_threshold=0.25):
         super().__init__()
         self.camera_id = camera_config['id']
         self.camera_name = camera_config['name']
         self.source = camera_config['source']
         self.shared_model = shared_model
+        self.shared_pose_model = shared_pose_model
         
         # Initialize independent detector state for this camera
         # We pass the shared model to it (requires update in detector.py)
-        self.detector = PhoneDetector(model_instance=self.shared_model, lock=model_lock)
+        self.detector = PhoneDetector(
+            model_instance=self.shared_model,
+            pose_model_instance=self.shared_pose_model,
+            lock=model_lock
+        )
         
         self.conf_threshold = conf_threshold
         self.running = False
@@ -67,7 +72,8 @@ class CameraThread(threading.Thread):
                 SKIP_FRAMES = 3
                 
                 try:
-                    processed_frame, is_detected, is_saved = self.detector.process_frame(
+                    # process_frame now returns (frame, status_string, is_saved)
+                    processed_frame, status, is_saved = self.detector.process_frame(
                         frame, 
                         frame_count, 
                         skip_frames=SKIP_FRAMES, 
@@ -77,7 +83,7 @@ class CameraThread(threading.Thread):
                     )
                     
                     self.latest_frame = processed_frame
-                    self.status = "texting" if is_detected else "safe"
+                    self.status = status
                     self.last_update_time = time.time()
                     
                 except Exception as e:
@@ -111,11 +117,14 @@ class CameraManager:
         self.config_file = config_file
         self.cameras = {} # id -> CameraThread
         self.shared_model = None
+        self.shared_pose_model = None
         
         # Load Model Once
-        print("Loading Shared YOLO Model...")
+        print("Loading Shared YOLO Model (Detection)...")
         self.shared_model = YOLO('yolo11n.pt')
-        print("Model Loaded.")
+        print("Loading Shared YOLO Model (Pose)...")
+        self.shared_pose_model = YOLO('yolo11n-pose.pt')
+        print("Models Loaded.")
         
         self.load_config_and_start()
 
@@ -146,7 +155,7 @@ class CameraManager:
         if cam_id in self.cameras:
             return # Already running
             
-        thread = CameraThread(config, self.shared_model)
+        thread = CameraThread(config, self.shared_model, self.shared_pose_model)
         thread.start()
         self.cameras[cam_id] = thread
 
