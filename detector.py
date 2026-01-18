@@ -186,10 +186,20 @@ class PhoneDetector:
             cv2.circle(frame, (x, y), 5, color, -1)
 
             # Evidence Saving for Sleep/HeadDown
+            # Prioritize Status: Texting > Sleeping > Head Down
+            new_status = "safe"
             if "SLEEPING" in text:
-                status_flag = "sleeping"
+                new_status = "sleeping"
             elif "HEAD DOWN" in text:
-                status_flag = "head_down"
+                new_status = "head_down"
+
+            # Only overwrite status_flag if it is NOT currently 'texting'
+            # And if we are upgrading from 'safe' or 'head_down' to 'sleeping'
+            if status_flag != "texting":
+                if new_status == "sleeping":
+                    status_flag = "sleeping"
+                elif new_status == "head_down" and status_flag != "sleeping":
+                    status_flag = "head_down"
 
             # Check if we should save evidence for this event
             # Reuse similar logic to phone

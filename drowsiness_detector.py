@@ -91,11 +91,22 @@ class DrowsinessDetector:
             return 0, 0
 
         rmat, jac = cv2.Rodrigues(rot_vec)
-        angles, mtxR, mtxQ, Q, Qx, Qy, Qz = cv2.RQDecomp3x3(rmat)
+        # cv2.RQDecomp3x3 returns 6 values: mtxR, mtxQ, Qx, Qy, Qz, eulerAngles
+        # But based on typical usage, the first element usually contains the euler angles in some versions,
+        # or it is returned as the last.
+        # Let's inspect based on previous finding: it returns a tuple of 6.
+        # (eulerAngles, mtxR, mtxQ, Qx, Qy, Qz) ?
+        # Actually standard OpenCV RQDecomp3x3 returns: (mtxR, mtxQ, Qx, Qy, Qz, eulerAngles)
+        # BUT locally we saw: ((0,0,0), mtxR, mtxQ, Qx, Qy, Qz)
+        # So the first element is the angles.
+
+        ret = cv2.RQDecomp3x3(rmat)
+        angles = ret[0]
 
         # angles[0] = Pitch, angles[1] = Yaw
-        pitch = angles[0] * 360
-        yaw = angles[1] * 360
+        # RQDecomp3x3 returns angles in degrees directly
+        pitch = angles[0]
+        yaw = angles[1]
 
         return pitch, yaw
 
