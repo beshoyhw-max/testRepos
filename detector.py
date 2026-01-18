@@ -5,6 +5,7 @@ import math
 import datetime
 from ultralytics import YOLO
 import threading
+from drowsiness_detector import DrowsinessDetector
 
 class PhoneDetector:
     def __init__(self, model_path='yolo11s.pt', output_dir="detections", cooldown_seconds=5, consistency_threshold=3, model_instance=None, lock=None):
@@ -19,6 +20,9 @@ class PhoneDetector:
             self.model = model_instance
         else:
             self.model = YOLO(model_path)
+
+        # Drowsiness Detector
+        self.drowsiness_detector = DrowsinessDetector()
             
         self.PHONE_CLASS_ID = 67
         self.PERSON_CLASS_ID = 0
@@ -33,6 +37,7 @@ class PhoneDetector:
         
         # State for frame skipping
         self.last_display_data = [] # List of (x1, y1, x2, y2, color, status)
+        self.last_drowsiness_data = [] # List of (x, y, text, color)
 
     def process_frame(self, frame, frame_count, skip_frames=5, save_screenshots=True, conf_threshold=0.25, camera_name="Unknown"):
         """
@@ -49,8 +54,9 @@ class PhoneDetector:
 
         phone_detected_global = False
         screenshot_saved_global = False
+        status_flag = "safe" # can be safe, texting, sleeping, head_down
 
-        # --- HEAVY INFERENCE STEP ---
+        # --- HEAVY INFERENCE STEP (YOLO) ---
         if frame_count % skip_frames == 0:
             self.last_display_data = [] # Reset display data
             
@@ -125,6 +131,7 @@ class PhoneDetector:
                                     status = "texting"
                                     color = (0, 0, 255) # Red
                                     phone_detected_global = True
+                                    status_flag = "texting"
                                     
                                     # Attempt Save
                                     if save_screenshots:
@@ -136,7 +143,7 @@ class PhoneDetector:
                                         
                                         if should_save:
                                             self.screenshot_locations.append((p_cx, p_cy, current_time))
-                                            self.save_evidence(frame, x1, y1, x2, y2, camera_name)
+                                            self.save_evidence(frame, x1, y1, x2, y2, camera_name, "PHONE")
                                             screenshot_saved_global = True
                                 break
                         
@@ -156,26 +163,51 @@ class PhoneDetector:
                     self.last_display_data.append((x1, y1, x2, y2, color, status))
 
             # --- PRUNING STREAKS ---
-            # Remove streaks that were not matched in this frame (person stopped using phone or left)
-            # We match if the streak's last_seen is very close to current_time
-            # Since we just updated 'last_seen' for matched candidates, we can use that.
             self.detection_streaks = [
                 d for d in self.detection_streaks 
                 if (current_time - d['last_seen']) < 1.0 # 1 second tolerance
             ]
 
-        # --- DRAWING (Every Frame using cached data) ---
+        # --- DRAWING YOLO (Every Frame using cached data) ---
         for (x1, y1, x2, y2, color, status) in self.last_display_data:
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             if status == "texting":
                 cv2.putText(frame, "PHONE DETECTED", (x1, y1 - 10), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                # Keep the global flag true if we are still displaying the alert
-                phone_detected_global = True 
+                phone_detected_global = True
+                status_flag = "texting"
 
-        return frame, phone_detected_global, screenshot_saved_global
+        # --- DROWSINESS & POSTURE INFERENCE (Every Frame for now, fast enough) ---
+        # MediaPipe is lightweight. If performance drops, we can skip frames too.
+        drowsiness_display, statuses = self.drowsiness_detector.process(frame, current_time)
 
-    def save_evidence(self, frame, x1, y1, x2, y2, camera_name="Unknown"):
+        for (x, y, text, color) in drowsiness_display:
+            cv2.putText(frame, text, (x - 50, y - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+            cv2.circle(frame, (x, y), 5, color, -1)
+
+            # Evidence Saving for Sleep/HeadDown
+            if "SLEEPING" in text:
+                status_flag = "sleeping"
+            elif "HEAD DOWN" in text:
+                status_flag = "head_down"
+
+            # Check if we should save evidence for this event
+            # Reuse similar logic to phone
+            if text in ["SLEEPING", "HEAD DOWN"] and save_screenshots:
+                should_save = True
+                # Use a separate spatial cooldown or same? Same is fine to avoid spam
+                for (sx, sy, stime) in self.screenshot_locations:
+                    if math.sqrt((x - sx)**2 + (y - sy)**2) < 50:
+                         should_save = False; break
+
+                if should_save:
+                    self.screenshot_locations.append((x, y, current_time))
+                    self.save_evidence(frame, x-50, y-50, x+50, y+50, camera_name, text)
+                    screenshot_saved_global = True
+
+        return frame, status_flag, screenshot_saved_global
+
+    def save_evidence(self, frame, x1, y1, x2, y2, camera_name="Unknown", violation_type="PHONE"):
         evidence_img = frame.copy()
         
         # Draw the box on the evidence
@@ -186,7 +218,7 @@ class PhoneDetector:
         # Draw black bar at top
         cv2.rectangle(evidence_img, (0, 0), (evidence_img.shape[1], 40), (0,0,0), -1)
         # Add text
-        header_text = f"PHONE | {camera_name} | {ts}"
+        header_text = f"{violation_type} | {camera_name} | {ts}"
         cv2.putText(evidence_img, header_text, (10, 25), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
