@@ -54,6 +54,13 @@ except Exception as e:
     st.stop()
 
 # --- Sidebar ---
+st.sidebar.title("Navigation")
+page_selection = st.sidebar.radio(
+    "Go to",
+    ["🔴 Live Dashboard", "📸 Evidence Log", "⚙️ Configuration"]
+)
+
+st.sidebar.markdown("---")
 st.sidebar.header("Global Controls")
 conf_threshold = st.sidebar.slider("Sensitivity (Confidence)", 0.1, 1.0, 0.25)
 # Update manager config whenever this changes
@@ -62,16 +69,7 @@ manager.update_global_conf(conf_threshold)
 st.sidebar.markdown("---")
 st.sidebar.info(f"Active Cameras: {len(manager.get_active_cameras())}")
 
-# --- Navigation ---
-# Using Radio Button instead of Tabs to ensure correct loop breaking
-page_selection = st.radio(
-    "Navigate",
-    ["🔴 Live Dashboard", "📸 Evidence Log", "⚙️ Configuration"],
-    horizontal=True,
-    label_visibility="collapsed"
-)
-
-st.markdown("---")
+# --- Main Content ---
 
 # --- Page 1: Live Dashboard ---
 if page_selection == "🔴 Live Dashboard":
