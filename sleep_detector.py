@@ -232,14 +232,25 @@ class SleepDetector:
         has_shoulders = has_pt(5) and has_pt(6)
         # Expanded face check to include ears (3, 4)
         has_face = has_pt(0) or has_pt(1) or has_pt(2) or has_pt(3) or has_pt(4)
-        
+
         # If we have shoulders but NO face parts at all:
         # It could be sleep (head buried in arms) OR back to camera OR model failure.
-        # Safest is to NOT assume sleep immediately to avoid false positives.
+        # HEURISTIC: Check Shoulder Height.
+        # - If shoulders are very high in the crop (Top 25%), the head is likely buried/below.
+        # - If shoulders are low (Middle/Bottom), there is space above for an (undetected) head.
+
         if has_shoulders and not has_face:
-            # We return False for sleep, but we could log it as "posture_unknown"
-            # This fixes the "Wide Awake but MediaPipe failed" bug.
-            return result
+            shoulder_y = (kpts[5][1] + kpts[6][1]) / 2
+
+            # If shoulders are in the top 25% of the crop
+            if shoulder_y < crop_height * 0.25:
+                result['is_sleeping'] = True
+                result['reason'] = "head_buried_high_shoulders"
+                result['details']['shoulder_height_ratio'] = shoulder_y / crop_height
+                return result
+            else:
+                # Shoulders are low -> Likely just "Face Lost" on a sitting person
+                return result
         
         # === 2. DEEP SLUMP (Your original - ENHANCED) ===
         if has_pt(0) and has_shoulders:
