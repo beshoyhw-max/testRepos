@@ -6,9 +6,10 @@ import datetime
 from ultralytics import YOLO
 import threading
 from sleep_detector import SleepDetector
+from cooldown_manager import CooldownManager
 
 class PhoneDetector:
-    def __init__(self, model_path='yolo26n.pt', output_dir="detections", cooldown_seconds=5, consistency_threshold=3, model_instance=None, pose_model_instance=None, lock=None):
+    def __init__(self, model_path='yolo26n.pt', output_dir="detections", cooldown_seconds=120, consistency_threshold=3, model_instance=None, pose_model_instance=None, lock=None):
         
         self.output_dir = output_dir
         if not os.path.exists(self.output_dir):
@@ -36,9 +37,8 @@ class PhoneDetector:
         self.sleep_streaks = []  # Track sleep consistency per person
         self.SLEEP_CONSISTENCY_THRESHOLD = 3  # Need 3 consecutive detections
         
-        # Spatial cooldown tracking: list of (x, y, timestamp, type)
-        # type can be 'phone' or 'sleep'
-        self.screenshot_locations = []
+        # Generic Cooldown Manager
+        self.cooldown_manager = CooldownManager(cooldown_seconds=cooldown_seconds)
         
         # State for frame skipping
         self.last_display_data = [] # List of (x1, y1, x2, y2, color, status)
@@ -50,13 +50,6 @@ class PhoneDetector:
         Returns: frame, global_status_string, screenshot_saved_bool
         """
         current_time = time.time()
-        
-        # Cleanup old cooldowns (older than cooldown_seconds)
-        # Format: (x, y, timestamp, type)
-        self.screenshot_locations = [
-            s for s in self.screenshot_locations 
-            if (current_time - s[2]) < self.COOLDOWN_SECONDS
-        ]
 
         global_status = "safe" # safe, texting, sleeping
         screenshot_saved_global = False
@@ -138,18 +131,10 @@ class PhoneDetector:
                                     global_status = "texting"
                                     
                                     # Attempt Save
-                                    if save_screenshots:
-                                        # Check spatial cooldown
-                                        should_save = True
-                                        for (sx, sy, stime, stype) in self.screenshot_locations:
-                                            if stype == 'phone' and math.sqrt((p_cx - sx)**2 + (p_cy - sy)**2) < 100:
-                                                should_save = False
-                                                break
-                                        
-                                        if should_save:
-                                            self.screenshot_locations.append((p_cx, p_cy, current_time, 'phone'))
-                                            self.save_evidence(frame, x1, y1, x2, y2, camera_name, "PHONE")
-                                            screenshot_saved_global = True
+                                    if save_screenshots and self.cooldown_manager.should_capture(p_cx, p_cy, 'phone'):
+                                        self.cooldown_manager.record_capture(p_cx, p_cy, 'phone')
+                                        self.save_evidence(frame, x1, y1, x2, y2, camera_name, "PHONE")
+                                        screenshot_saved_global = True
                                 break
                         
                         if not matched:
@@ -195,17 +180,10 @@ class PhoneDetector:
                                             global_status = "sleeping"
                                         
                                         # SAVE SLEEP SCREENSHOT
-                                        if save_screenshots:
-                                            should_save = True
-                                            for (sx2, sy2, stime, stype) in self.screenshot_locations:
-                                                if stype == 'sleep' and math.sqrt((p_cx - sx2)**2 + (p_cy - sy2)**2) < 100:
-                                                    should_save = False
-                                                    break
-                                            
-                                            if should_save:
-                                                self.screenshot_locations.append((p_cx, p_cy, current_time, 'sleep'))
-                                                self.save_evidence(frame, x1, y1, x2, y2, camera_name, "SLEEP")
-                                                screenshot_saved_global = True
+                                        if save_screenshots and self.cooldown_manager.should_capture(p_cx, p_cy, 'sleep'):
+                                            self.cooldown_manager.record_capture(p_cx, p_cy, 'sleep')
+                                            self.save_evidence(frame, x1, y1, x2, y2, camera_name, "SLEEP")
+                                            screenshot_saved_global = True
                                     break
                             
                             if not matched_sleep:
