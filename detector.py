@@ -31,7 +31,8 @@ class PhoneDetector:
         # Temporal consistency: list of {'center': (x,y), 'streak': int, 'last_seen': time, 'id': int, 'cooldowns': {}}
         self.detection_streaks = []
         self.CONSISTENCY_THRESHOLD = consistency_threshold
-        
+        self.SLEEP_CONSISTENCY_THRESHOLD = 3
+
         # Simulated Person Tracking ID
         self.next_person_id = 1
 
