@@ -102,12 +102,19 @@ class SleepDetector:
                 duration = current_time - state['closed_start']
                 
                 # === ENHANCED: Combine eyes + movement ===
-                # If eyes closed BUT head moving significantly = likely reading/writing
+                # If eyes closed BUT head moving significantly = likely reading/writing/active
+                # VETO: If head is NOT still, force status to "active" (or just "drowsy" at worst)
+                # This fixes False Positives for people with naturally small/hooded eyes (e.g. Asian descent)
+                if not is_head_still:
+                     state['last_active_time'] = current_time
+                     return "awake", {
+                        "ear": avg_ear,
+                        "still": False,
+                        "reason": "movement_override",
+                        "source": "mediapipe"
+                     }
                 
-                # === SIMPLIFIED: Remove movement check for sleep detection ===
-                # The temporal consistency in detector.py will handle false positives
-                
-                # Eyes closed = likely sleeping (after threshold)
+                # Eyes closed + Head Still = likely sleeping (after threshold)
                 if duration > self.SLEEP_TIME_THRESHOLD:
                     return "sleeping", {
                         "ear": avg_ear, 
