@@ -8,7 +8,7 @@ import threading
 from sleep_detector import SleepDetector
 
 class PhoneDetector:
-    def __init__(self, model_path='yolo11s.pt', output_dir="detections", cooldown_seconds=5, consistency_threshold=3, model_instance=None, pose_model_instance=None, lock=None):
+    def __init__(self, model_path='yolo26n.pt', output_dir="detections", cooldown_seconds=5, consistency_threshold=3, model_instance=None, pose_model_instance=None, lock=None):
         
         self.output_dir = output_dir
         if not os.path.exists(self.output_dir):

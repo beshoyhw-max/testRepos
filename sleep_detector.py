@@ -9,7 +9,7 @@ from ultralytics import YOLO
 import os
 
 class SleepDetector:
-    def __init__(self, pose_model_path='yolo11n-pose.pt', mp_model_path='models/face_landmarker.task', pose_model_instance=None):
+    def __init__(self, pose_model_path='yolo26n-pose.pt', mp_model_path='models/face_landmarker.task', pose_model_instance=None):
         # 1. Load YOLO Pose
         if pose_model_instance:
             self.pose_model = pose_model_instance
