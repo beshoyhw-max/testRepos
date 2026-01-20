@@ -129,7 +129,7 @@ class PhoneDetector:
                             if (current_time - last_time) > self.COOLDOWN_SECONDS:
                                 # Save Evidence
                                 type_str = "PHONE" if status == "texting" else "SLEEP"
-                                self.save_evidence(frame, x1, y1, x2, y2, camera_name, type_str)
+                                self.save_evidence(frame, x1, y1, x2, y2, camera_name, type_str, track_id=track_id)
                                 screenshot_saved_global = True
 
                                 # Update Cooldown
@@ -162,12 +162,13 @@ class PhoneDetector:
 
         return frame, global_status, screenshot_saved_global
 
-    def save_evidence(self, frame, x1, y1, x2, y2, camera_name="Unknown", detection_type="PHONE"):
+    def save_evidence(self, frame, x1, y1, x2, y2, camera_name="Unknown", detection_type="PHONE", track_id=None):
         """
         Save evidence screenshot.
         
         Args:
             detection_type: "PHONE" or "SLEEP"
+            track_id: ID of the person (optional)
         """
         evidence_img = frame.copy()
         
@@ -184,11 +185,12 @@ class PhoneDetector:
         cv2.putText(evidence_img, header_text, (10, 25), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-        timestamp_fn = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        timestamp_fn = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")[:-3] # Add ms
         # Sanitize camera name for filename
         safe_cam_name = "".join([c for c in camera_name if c.isalnum() or c in (' ', '_', '-')]).strip().replace(' ', '_')
         
-        # Add detection type to filename
-        filename = os.path.join(self.output_dir, f"evidence_{detection_type.lower()}_{safe_cam_name}_{timestamp_fn}.jpg")
+        # Add detection type and ID to filename to ensure uniqueness
+        id_str = f"_id{track_id}" if track_id is not None else ""
+        filename = os.path.join(self.output_dir, f"evidence_{detection_type.lower()}_{safe_cam_name}_{timestamp_fn}{id_str}.jpg")
         cv2.imwrite(filename, evidence_img)
         print(f"📸 EVIDENCE SAVED: {filename}")
