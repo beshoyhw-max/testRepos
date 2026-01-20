@@ -183,7 +183,7 @@ if page_selection == "🔴 Live Dashboard":
                         # Resize for bandwidth/performance if needed (optional)
                         # frame_small = cv2.resize(frame, (640, 360)) 
                         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        container["frame"].image(frame_rgb, use_container_width=True)
+                        container["frame"].image(frame_rgb, width='stretch')
                     else:
                         # Show black placeholder
                         container["frame"].info("No Signal")
@@ -218,7 +218,7 @@ elif page_selection == "📸 Evidence Log":
         for idx, img_path in enumerate(image_files):
             with cols[idx % 4]:
                 image = Image.open(img_path)
-                st.image(image, width="stretch")
+                st.image(image, width='stretch')
                 # Parse filename
                 # format: evidence_{cam_name}_{timestamp}.jpg
                 # filename = os.path.basename(img_path)
