@@ -1,7 +1,6 @@
 import cv2
 import time
 import os
-import math
 import datetime
 from ultralytics import YOLO
 import threading

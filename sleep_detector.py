@@ -58,7 +58,6 @@ class SleepDetector:
                 'status': 'awake',
                 'last_seen': current_time,
                 'head_positions': [],  # NEW: Track head movement
-                'last_active_time': current_time,  # NEW: Track when last active
                 'ear_history': [] # NEW: History for dynamic EAR calibration
             }
 
@@ -140,7 +139,6 @@ class SleepDetector:
             else:
                 # EYES OPEN -> Awake
                 state['closed_start'] = None
-                state['last_active_time'] = current_time
                 return "awake", {
                     "ear": avg_ear, 
                     "still": is_head_still,
@@ -175,7 +173,6 @@ class SleepDetector:
                 
                 # === NEW: Check if actively writing/taking notes ===
                 if posture_result['is_writing']:
-                    state['last_active_time'] = current_time
                     return "awake", {
                         "reason": "writing_detected",
                         "source": "yolo-pose",
