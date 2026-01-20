@@ -198,9 +198,9 @@ class CameraManager:
         
         # Load Model Once
         print("Loading Shared YOLO Model (Detection)...")
-        self.shared_model = YOLO('yolo11n.pt')
+        self.shared_model = YOLO('yolo26n.pt')
         print("Loading Shared YOLO Model (Pose)...")
-        self.shared_pose_model = YOLO('yolo11n-pose.pt')
+        self.shared_pose_model = YOLO('yolo26n-pose.pt')
         print("Models Loaded.")
         
         self.load_config_and_start()
