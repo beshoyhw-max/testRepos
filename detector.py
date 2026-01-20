@@ -51,6 +51,10 @@ class PhoneDetector:
         self.save_queue = []
         self.save_thread_lock = threading.Lock()
 
+        # Per-Person ID Cooldowns (track_id -> {type: timestamp})
+        self.person_cooldowns = {}
+        self.PERSON_COOLDOWN_SEC = 120 # 2 minutes per person per violation
+
     def _save_evidence_async_worker(self, evidence_img, filename):
         """Worker to save image in background"""
         try:
