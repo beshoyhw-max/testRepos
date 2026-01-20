@@ -96,17 +96,19 @@ class VideoReader:
 
 
 class CameraThread(threading.Thread):
-    def __init__(self, camera_config, shared_model, shared_pose_model, conf_threshold=0.25):
+    def __init__(self, camera_config, shared_pose_model, conf_threshold=0.25):
         super().__init__()
         self.camera_id = camera_config['id']
         self.camera_name = camera_config['name']
         self.source = camera_config['source']
-        self.shared_model = shared_model
+        # self.shared_model is removed to allow per-thread tracking
         self.shared_pose_model = shared_pose_model
         
         # Initialize independent detector state for this camera
+        # We pass model_path='yolo11n.pt' to use the Nano model per thread
         self.detector = PhoneDetector(
-            model_instance=self.shared_model,
+            model_path='yolo11n.pt',
+            model_instance=None, # Force independent instance
             pose_model_instance=self.shared_pose_model,
             lock=model_lock
         )
@@ -193,12 +195,9 @@ class CameraManager:
     def __init__(self, config_file="cameras.json"):
         self.config_file = config_file
         self.cameras = {} # id -> CameraThread
-        self.shared_model = None
         self.shared_pose_model = None
         
-        # Load Model Once
-        print("Loading Shared YOLO Model (Detection)...")
-        self.shared_model = YOLO('yolo11n.pt')
+        # Load Shared Pose Model (Stateless usage on crops)
         print("Loading Shared YOLO Model (Pose)...")
         self.shared_pose_model = YOLO('yolo11n-pose.pt')
         print("Models Loaded.")
@@ -232,7 +231,7 @@ class CameraManager:
         if cam_id in self.cameras:
             return # Already running
             
-        thread = CameraThread(config, self.shared_model, self.shared_pose_model)
+        thread = CameraThread(config, self.shared_pose_model)
         thread.start()
         self.cameras[cam_id] = thread
 
