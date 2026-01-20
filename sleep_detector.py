@@ -15,7 +15,13 @@ class SleepDetector:
             self.pose_model = pose_model_instance
         else:
             print("Loading YOLO Pose...")
-            self.pose_model = YOLO(pose_model_path)
+            # Check for OpenVINO version first
+            ov_path = pose_model_path.replace('.pt', '_openvino_model/')
+            if os.path.exists(ov_path):
+                 print("Using OpenVINO Pose Model...")
+                 self.pose_model = YOLO(ov_path, task='pose')
+            else:
+                 self.pose_model = YOLO(pose_model_path)
 
         # 2. Load MediaPipe Face Landmarker
         print("Loading MediaPipe Face Landmarker...")
@@ -66,8 +72,20 @@ class SleepDetector:
         state['last_seen'] = current_time
 
         # --- STEP 1: EYES CHECK (MediaPipe) ---
+        # Optimization: Resize crop for MediaPipe if it's too large
+        # MediaPipe Face Landmarker works well on smaller inputs (~256x256)
+        mp_input = crop
+        h, w = crop.shape[:2]
+        if w > 320 or h > 320:
+            scale = 320 / max(w, h)
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            mp_input = cv2.resize(crop, (new_w, new_h))
+        else:
+            scale = 1.0
+
         # Convert to MP Image
-        rgb_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        rgb_crop = cv2.cvtColor(mp_input, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_crop)
 
         detection_result = self.detector.detect(mp_image)
@@ -78,7 +96,8 @@ class SleepDetector:
 
             # === NEW: Track Head Position for Movement Analysis ===
             nose_landmark = landmarks[1]  # Nose tip
-            nose_position = (nose_landmark.x * crop.shape[1], nose_landmark.y * crop.shape[0])
+            # Scale back to original crop coordinates for logic consistency
+            nose_position = (nose_landmark.x * w, nose_landmark.y * h)
             
             # Update movement buffer
             state['head_positions'].append(nose_position)

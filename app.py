@@ -54,19 +54,30 @@ except Exception as e:
     st.stop()
 
 # --- Sidebar ---
+st.sidebar.title("Navigation")
+page_selection = st.sidebar.radio(
+    "Go to",
+    ["🔴 Live Dashboard", "📸 Evidence Log", "⚙️ Configuration"]
+)
+
+st.sidebar.markdown("---")
 st.sidebar.header("Global Controls")
 conf_threshold = st.sidebar.slider("Sensitivity (Confidence)", 0.1, 1.0, 0.25)
 # Update manager config whenever this changes
 manager.update_global_conf(conf_threshold)
 
+# Performance Controls
+with st.sidebar.expander("🚀 Performance Tuning"):
+    skip_frames = st.slider("Frame Skip (Higher = Lower CPU)", 1, 30, 5, help="Process 1 out of every N frames.")
+    manager.update_global_skip(skip_frames)
+
 st.sidebar.markdown("---")
 st.sidebar.info(f"Active Cameras: {len(manager.get_active_cameras())}")
 
-# --- Tabs ---
-tab1, tab2, tab3 = st.tabs(["🔴 Live Dashboard", "📸 Evidence Log", "⚙️ Configuration"])
+# --- Main Content ---
 
-# --- Tab 1: Live Dashboard ---
-with tab1:
+# --- Page 1: Live Dashboard ---
+if page_selection == "🔴 Live Dashboard":
     # 1. Global Alert System
     active_cams = manager.get_active_cameras()
     
@@ -115,8 +126,9 @@ with tab1:
             with cols[col_idx]:
                 cam = active_cams[cam_id]
                 st.subheader(f"📹 {cam.camera_name}")
-                status_text = st.empty()
+                # Place video FIRST, then status to prevent status text resizing from moving the video
                 frame_view = st.empty()
+                status_text = st.empty()
                 
                 # Add Fullscreen/Stop controls (State management in a loop is tricky in Streamlit, 
                 # usually requires callback buttons. We stick to simple view for now).
@@ -132,9 +144,15 @@ with tab1:
         # In Streamlit, the whole script reruns on interaction. 
         # To get video, we need a while loop inside this tab logic.
         
-        run_monitor = st.checkbox("Start Live Monitor", value=True)
+        # Use a unique key to persist state across tab switches
+        run_monitor = st.checkbox("Start Live Monitor", value=True, key="run_live_monitor")
         
         if run_monitor:
+            placeholder = st.empty()
+            with placeholder.container():
+                # We use a placeholder to allow clearing if needed, though not strictly necessary for the loop
+                pass
+
             while True:
                 # Update all cameras
                 loop_texting = []
@@ -168,7 +186,7 @@ with tab1:
                         # Resize for bandwidth/performance if needed (optional)
                         # frame_small = cv2.resize(frame, (640, 360)) 
                         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        container["frame"].image(frame_rgb, width="stretch")
+                        container["frame"].image(frame_rgb, use_container_width=True)
                     else:
                         # Show black placeholder
                         container["frame"].info("No Signal")
@@ -186,8 +204,8 @@ with tab1:
                 # Sleep to limit UI refresh rate (separate from detection rate)
                 time.sleep(0.1)
 
-# --- Tab 2: Evidence Log ---
-with tab2:
+# --- Page 2: Evidence Log ---
+elif page_selection == "📸 Evidence Log":
     st.subheader("Infraction History")
     
     if st.button("Refresh Gallery"):
@@ -210,8 +228,8 @@ with tab2:
                 # Display clean name
                 st.caption(os.path.basename(img_path))
 
-# --- Tab 3: Configuration ---
-with tab3:
+# --- Page 3: Configuration ---
+elif page_selection == "⚙️ Configuration":
     st.header("Camera Management")
     
     # List Existing
