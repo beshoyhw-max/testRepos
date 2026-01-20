@@ -8,7 +8,7 @@ import threading
 from sleep_detector import SleepDetector
 
 class PhoneDetector:
-    def __init__(self, model_path='yolo26n.pt', output_dir="detections", cooldown_seconds=120, model_instance=None, pose_model_instance=None, lock=None):
+    def __init__(self, model_path='yolo26n.pt', output_dir="detections", cooldown_seconds=120, consistency_threshold=3, model_instance=None, pose_model_instance=None, lock=None):
         
         self.output_dir = output_dir
         if not os.path.exists(self.output_dir):
@@ -28,10 +28,14 @@ class PhoneDetector:
         self.PHONE_CLASS_ID = 67
         self.PERSON_CLASS_ID = 0
         self.COOLDOWN_SECONDS = cooldown_seconds # Default updated to 120 per requirements
+        self.CONSISTENCY_THRESHOLD = consistency_threshold
         
         # Cooldown tracking: Dictionary {(track_id, type): last_screenshot_time}
         self.cooldowns = {}
         
+        # Streak tracking: Dictionary {(track_id, type): current_streak_count}
+        self.streaks = {}
+
         # State for frame skipping
         self.last_display_data = [] # List of (x1, y1, x2, y2, color, status, label_text)
 
@@ -46,6 +50,7 @@ class PhoneDetector:
         # Cleanup old cooldowns (optional, to prevent memory leak over infinite time)
         if frame_count % 1000 == 0:
             self.cooldowns = {k: v for k, v in self.cooldowns.items() if (current_time - v) < self.COOLDOWN_SECONDS * 2}
+            self.streaks = {} # Periodic cleanup of stale streaks
 
         global_status = "safe" # safe, texting, sleeping
         screenshot_saved_global = False
@@ -105,7 +110,7 @@ class PhoneDetector:
                             status = "texting"
                             color = (0, 0, 255) # Red
                             global_status = "texting"
-                            
+
                         else:
                             # 3. Sleep Detection (If not texting)
                             # We use track_id as key for sleep state persistence if available
@@ -120,23 +125,59 @@ class PhoneDetector:
                             elif sleep_status == "drowsy":
                                 color = (0, 255, 255) # Yellow
 
-                        # --- COOLDOWN & SAVING ---
-                        # Only save if we have a valid Track ID and a violation
-                        if save_screenshots and track_id is not None and status in ["texting", "sleeping"]:
-                            key = (track_id, status)
-                            last_time = self.cooldowns.get(key, 0)
-                            
-                            if (current_time - last_time) > self.COOLDOWN_SECONDS:
-                                # Save Evidence
-                                type_str = "PHONE" if status == "texting" else "SLEEP"
-                                self.save_evidence(frame, x1, y1, x2, y2, camera_name, type_str, track_id=track_id)
-                                screenshot_saved_global = True
+                        # --- VERIFICATION STREAK ---
+                        # We need to confirm the violation persists for N frames to avoid glitches
 
-                                # Update Cooldown
-                                self.cooldowns[key] = current_time
+                        violation_type = None
+                        if status == "texting": violation_type = "texting"
+                        elif status == "sleeping": violation_type = "sleeping"
 
-                                # Visual feedback
-                                label += " [SAVED]"
+                        current_streak_val = 0
+
+                        if track_id is not None:
+                            # 1. Reset streaks for OTHER types for this ID (e.g. if now texting, reset sleep streak)
+                            # Actually, simpler: Just track the current active violation.
+
+                            streak_key = (track_id, violation_type)
+
+                            # Increment Streak
+                            if violation_type:
+                                self.streaks[streak_key] = self.streaks.get(streak_key, 0) + 1
+                                current_streak_val = self.streaks[streak_key]
+
+                            # Reset streaks for non-active violations (Optional, but good for precision)
+                            # (Skipping for performance, periodic cleanup handles staleness)
+
+                            # --- COOLDOWN & SAVING ---
+                            # Only save if:
+                            # 1. We have a valid Track ID
+                            # 2. We have a violation
+                            # 3. Streak >= Threshold (Verification)
+                            # 4. Cooldown expired
+
+                            if save_screenshots and violation_type:
+                                if current_streak_val >= self.CONSISTENCY_THRESHOLD:
+
+                                    key = (track_id, violation_type)
+                                    last_time = self.cooldowns.get(key, 0)
+
+                                    if (current_time - last_time) > self.COOLDOWN_SECONDS:
+                                        # Save Evidence
+                                        type_str = "PHONE" if violation_type == "texting" else "SLEEP"
+                                        self.save_evidence(frame, x1, y1, x2, y2, camera_name, type_str, track_id=track_id)
+                                        screenshot_saved_global = True
+
+                                        # Update Cooldown
+                                        self.cooldowns[key] = current_time
+
+                                        # Visual feedback
+                                        label += " [SAVED]"
+                                    else:
+                                        # Cooldown active
+                                        pass
+                                else:
+                                    # Building streak
+                                    label += f" [{current_streak_val}/{self.CONSISTENCY_THRESHOLD}]"
 
                     # Store for display
                     self.last_display_data.append((x1, y1, x2, y2, color, status, label))
