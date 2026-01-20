@@ -183,7 +183,7 @@ if page_selection == "🔴 Live Dashboard":
                         # Resize for bandwidth/performance if needed (optional)
                         # frame_small = cv2.resize(frame, (640, 360)) 
                         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        container["frame"].image(frame_rgb, use_container_width=True)
+                        container["frame"].image(frame_rgb, width='stretch')
                     else:
                         # Show black placeholder
                         container["frame"].info("No Signal")
