@@ -8,7 +8,7 @@ import threading
 from sleep_detector import SleepDetector
 
 class PhoneDetector:
-    def __init__(self, model_path='yolo26n.pt', output_dir="detections", cooldown_seconds=120, consistency_threshold=3, model_instance=None, pose_model_instance=None, lock=None):
+    def __init__(self, model_path='yolo26n.pt', output_dir="detections", cooldown_seconds=120, model_instance=None, pose_model_instance=None, lock=None):
         
         self.output_dir = output_dir
         if not os.path.exists(self.output_dir):
@@ -182,6 +182,9 @@ class PhoneDetector:
         cv2.rectangle(evidence_img, (0, 0), (evidence_img.shape[1], 40), (0,0,0), -1)
         # Add text
         header_text = f"{detection_type} | {camera_name} | {ts}"
+        if track_id is not None:
+             header_text += f" | ID: {track_id}"
+
         cv2.putText(evidence_img, header_text, (10, 25), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 

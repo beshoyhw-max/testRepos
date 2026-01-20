@@ -34,7 +34,6 @@ class SleepDetector:
         # Config
         self.EAR_THRESHOLD = 0.22  # Below this is closed
         self.SLEEP_TIME_THRESHOLD = 5.0 # Seconds (Increased to avoid false positives for thinking/resting)
-        self.BLINK_THRESHOLD = 0.1 # Seconds
         
         # === NEW: Head Movement Tracking ===
         self.HEAD_MOTION_THRESHOLD = 15.0   # Pixels - if movement < this, person is very still
