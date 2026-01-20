@@ -105,10 +105,11 @@ class CameraThread(threading.Thread):
         self.shared_pose_model = shared_pose_model
         
         # Initialize independent detector state for this camera
+        # Pass model_instance=None to force loading a fresh private model for tracking
         self.detector = PhoneDetector(
-            model_instance=self.shared_model,
+            model_instance=None,
             pose_model_instance=self.shared_pose_model,
-            lock=model_lock
+            lock=None # No lock needed for private model
         )
         
         self.conf_threshold = conf_threshold
@@ -197,8 +198,7 @@ class CameraManager:
         self.shared_pose_model = None
         
         # Load Model Once
-        print("Loading Shared YOLO Model (Detection)...")
-        self.shared_model = YOLO('yolo26n.pt')
+        # Note: Detection model is now loaded per-camera to support tracking persistence
         print("Loading Shared YOLO Model (Pose)...")
         self.shared_pose_model = YOLO('yolo26n-pose.pt')
         print("Models Loaded.")
@@ -232,7 +232,7 @@ class CameraManager:
         if cam_id in self.cameras:
             return # Already running
             
-        thread = CameraThread(config, self.shared_model, self.shared_pose_model)
+        thread = CameraThread(config, None, self.shared_pose_model)
         thread.start()
         self.cameras[cam_id] = thread
 
