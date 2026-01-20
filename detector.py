@@ -74,6 +74,22 @@ class PhoneDetector:
             if (current_time - s[2]) < self.COOLDOWN_SECONDS
         ]
 
+        # Cleanup old ID history (older than 10 minutes) to prevent memory leaks
+        if frame_count % 1000 == 0:
+            expired_ids = []
+            for pid, history in self.person_cooldowns.items():
+                # Check if all timestamps are old
+                is_active = False
+                for v_type, ts in history.items():
+                    if current_time - ts < 600: # 10 mins
+                        is_active = True
+                        break
+                if not is_active:
+                    expired_ids.append(pid)
+
+            for pid in expired_ids:
+                del self.person_cooldowns[pid]
+
         global_status = "safe" # safe, texting, sleeping
         screenshot_saved_global = False
 
@@ -146,9 +162,10 @@ class PhoneDetector:
 
         if self.lock:
             with self.lock:
-                results = self.model.predict(frame, classes=[self.PERSON_CLASS_ID], conf=conf_threshold, verbose=False, imgsz=640)
+                # Switch to TRACKING to get persistence IDs
+                results = self.model.track(frame, classes=[self.PERSON_CLASS_ID], conf=conf_threshold, verbose=False, imgsz=640, persist=True)
         else:
-            results = self.model.predict(frame, classes=[self.PERSON_CLASS_ID], conf=conf_threshold, verbose=False, imgsz=640)
+            results = self.model.track(frame, classes=[self.PERSON_CLASS_ID], conf=conf_threshold, verbose=False, imgsz=640, persist=True)
 
         # Use cpu().numpy() or .tolist() to get coordinates
         if len(results) > 0:
@@ -156,8 +173,11 @@ class PhoneDetector:
             
             for idx, box in enumerate(boxes):
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
-                p_cx, p_cy = (x1 + x2) / 2, (y1 + y2) / 2
                 
+                # Get ID if tracking is successful
+                track_id = int(box.id.item()) if box.id is not None else -1
+                p_cx, p_cy = (x1 + x2) / 2, (y1 + y2) / 2
+
                 # Default status
                 status = "safe"
                 color = (0, 255, 0) # Green
@@ -195,7 +215,7 @@ class PhoneDetector:
                     for candidate in self.detection_streaks:
                         lx, ly = candidate['center']
                         dist = math.sqrt((p_cx - lx)**2 + (p_cy - ly)**2)
-                        
+
                         # Match if within 100 pixels
                         if dist < 100:
                             candidate['streak'] += 1
@@ -211,14 +231,28 @@ class PhoneDetector:
 
                                 # Attempt Save
                                 if save_screenshots:
-                                    # Check spatial cooldown
                                     should_save = True
-                                    for (sx, sy, stime, stype) in self.screenshot_locations:
-                                        if stype == 'phone' and math.sqrt((p_cx - sx)**2 + (p_cy - sy)**2) < 100:
+
+                                    # 1. Check ID-based Cooldown
+                                    if track_id != -1:
+                                        if track_id not in self.person_cooldowns:
+                                            self.person_cooldowns[track_id] = {}
+
+                                        last_shot = self.person_cooldowns[track_id].get('phone', 0)
+                                        if current_time - last_shot < self.PERSON_COOLDOWN_SEC:
                                             should_save = False
-                                            break
+
+                                    # 2. Fallback: Check spatial cooldown (if ID lost or new track)
+                                    if should_save:
+                                        for (sx, sy, stime, stype) in self.screenshot_locations:
+                                            if stype == 'phone' and math.sqrt((p_cx - sx)**2 + (p_cy - sy)**2) < 100:
+                                                should_save = False
+                                                break
 
                                     if should_save:
+                                        if track_id != -1:
+                                            self.person_cooldowns[track_id]['phone'] = current_time
+
                                         self.screenshot_locations.append((p_cx, p_cy, current_time, 'phone'))
                                         self.save_evidence(frame, x1, y1, x2, y2, camera_name, "PHONE")
                                         # screenshot_saved_global = True
@@ -243,7 +277,7 @@ class PhoneDetector:
                     # Assumption: People don't swap seats often.
                     sleep_key = f"{camera_name}_idx_{idx}"
                     sleep_status, sleep_info = self.sleep_detector.process_crop(person_crop, id_key=sleep_key)
-                    
+
 
                     if sleep_status == "sleeping":
                         # ADD TEMPORAL CONSISTENCY FOR SLEEP
@@ -252,7 +286,7 @@ class PhoneDetector:
                         for sleep_candidate in self.sleep_streaks:
                             sx, sy = sleep_candidate['center']
                             dist = math.sqrt((p_cx - sx)**2 + (p_cy - sy)**2)
-                            
+
                             if dist < 100:
                                 sleep_candidate['streak'] += 1
                                 sleep_candidate['center'] = (p_cx, p_cy)
@@ -270,20 +304,35 @@ class PhoneDetector:
                                 if sleep_candidate['streak'] >= self.SLEEP_CONSISTENCY_THRESHOLD:
                                     status = "sleeping"
                                     color = (255, 0, 0) # Blue (BGR)
-                                    
+
                                     if save_screenshots:
                                         should_save = True
-                                        for (sx2, sy2, stime, stype) in self.screenshot_locations:
-                                            if stype == 'sleep' and math.sqrt((p_cx - sx2)**2 + (p_cy - sy2)**2) < 100:
-                                                should_save = False
-                                                break
                                         
+                                        # 1. Check ID-based Cooldown
+                                        if track_id != -1:
+                                            if track_id not in self.person_cooldowns:
+                                                self.person_cooldowns[track_id] = {}
+
+                                            last_shot = self.person_cooldowns[track_id].get('sleep', 0)
+                                            if current_time - last_shot < self.PERSON_COOLDOWN_SEC:
+                                                should_save = False
+
+                                        # 2. Fallback: Check spatial cooldown
                                         if should_save:
+                                            for (sx2, sy2, stime, stype) in self.screenshot_locations:
+                                                if stype == 'sleep' and math.sqrt((p_cx - sx2)**2 + (p_cy - sy2)**2) < 100:
+                                                    should_save = False
+                                                    break
+
+                                        if should_save:
+                                            if track_id != -1:
+                                                self.person_cooldowns[track_id]['sleep'] = current_time
+
                                             self.screenshot_locations.append((p_cx, p_cy, current_time, 'sleep'))
                                             self.save_evidence(frame, x1, y1, x2, y2, camera_name, "SLEEP")
                                             # screenshot_saved_global = True
                                 break
-                        
+
                         if not matched_sleep:
                             # New sleep candidate
                             self.sleep_streaks.append({
@@ -291,7 +340,7 @@ class PhoneDetector:
                                 'streak': 1,
                                 'last_seen': current_time
                             })
-                        
+
                     elif sleep_status == "drowsy":
                         # Warning color
                         color = (0, 255, 255) # Yellow
