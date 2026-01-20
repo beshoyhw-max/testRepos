@@ -59,7 +59,8 @@ class SleepDetector:
                 'status': 'awake',
                 'last_seen': current_time,
                 'head_positions': [],  # NEW: Track head movement
-                'last_active_time': current_time  # NEW: Track when last active
+                'last_active_time': current_time,  # NEW: Track when last active
+                'ear_history': [] # NEW: History for dynamic EAR calibration
             }
 
         state = self.state[id_key]
@@ -90,11 +91,27 @@ class SleepDetector:
             right_ear = self._calculate_ear(landmarks, [362, 385, 387, 263, 373, 380])
             avg_ear = (left_ear + right_ear) / 2.0
 
+            # Update EAR History for Dynamic Calibration
+            if 'ear_history' not in state: state['ear_history'] = []
+            state['ear_history'].append(avg_ear)
+            if len(state['ear_history']) > 300: # Keep last ~10-30 seconds
+                state['ear_history'].pop(0)
+
+            # Calculate Dynamic Threshold
+            # Use 90th percentile to estimate "Open Eyes" baseline, effectively handling naturally small eyes
+            current_threshold = self.EAR_THRESHOLD # Default
+            if len(state['ear_history']) > 10:
+                baseline_ear = np.percentile(state['ear_history'], 90)
+                # Threshold is 80% of their "Open" state, but clamped
+                # Max 0.22 (Standard), Min 0.12 (Absolute closed)
+                dynamic = baseline_ear * 0.8
+                current_threshold = min(self.EAR_THRESHOLD, max(0.12, dynamic))
+
             # === NEW: Check Head Movement ===
             is_head_still = self._is_head_still(state['head_positions'])
 
             # Logic for Eyes Closed
-            if avg_ear < self.EAR_THRESHOLD:
+            if avg_ear < current_threshold:
                 # EYES CLOSED
                 if state['closed_start'] is None:
                     state['closed_start'] = current_time
@@ -102,12 +119,19 @@ class SleepDetector:
                 duration = current_time - state['closed_start']
                 
                 # === ENHANCED: Combine eyes + movement ===
-                # If eyes closed BUT head moving significantly = likely reading/writing
+                # If eyes closed BUT head moving significantly = likely reading/writing/active
+                # VETO: If head is NOT still, force status to "active" (or just "drowsy" at worst)
+                # This fixes False Positives for people with naturally small/hooded eyes (e.g. Asian descent)
+                if not is_head_still:
+                     state['last_active_time'] = current_time
+                     return "awake", {
+                        "ear": avg_ear,
+                        "still": False,
+                        "reason": "movement_override",
+                        "source": "mediapipe"
+                     }
                 
-                # === SIMPLIFIED: Remove movement check for sleep detection ===
-                # The temporal consistency in detector.py will handle false positives
-                
-                # Eyes closed = likely sleeping (after threshold)
+                # Eyes closed + Head Still = likely sleeping (after threshold)
                 if duration > self.SLEEP_TIME_THRESHOLD:
                     return "sleeping", {
                         "ear": avg_ear, 
@@ -223,14 +247,34 @@ class SleepDetector:
         crop_height = crop_shape[0]
         crop_width = crop_shape[1]
         
-        # === 1. HEAD BURIED / DOWN (Your original - KEEP) ===
+        # === 1. HEAD BURIED / DOWN ===
+        # REVISED: Previous "No Face = Sleep" logic caused false positives
+        # when MediaPipe failed or person turned away.
+        # We now require ears to be missing too, or just consider it 'drowsy'/'unknown'
+        # unless other strong signals exist.
+
         has_shoulders = has_pt(5) and has_pt(6)
-        has_face = has_pt(0) or has_pt(1) or has_pt(2)
-        
+        # Expanded face check to include ears (3, 4)
+        has_face = has_pt(0) or has_pt(1) or has_pt(2) or has_pt(3) or has_pt(4)
+
+        # If we have shoulders but NO face parts at all:
+        # It could be sleep (head buried in arms) OR back to camera OR model failure.
+        # HEURISTIC: Check Shoulder Height.
+        # - If shoulders are very high in the crop (Top 25%), the head is likely buried/below.
+        # - If shoulders are low (Middle/Bottom), there is space above for an (undetected) head.
+
         if has_shoulders and not has_face:
-            result['is_sleeping'] = True
-            result['reason'] = "head_buried"
-            return result
+            shoulder_y = (kpts[5][1] + kpts[6][1]) / 2
+
+            # If shoulders are in the top 25% of the crop
+            if shoulder_y < crop_height * 0.25:
+                result['is_sleeping'] = True
+                result['reason'] = "head_buried_high_shoulders"
+                result['details']['shoulder_height_ratio'] = shoulder_y / crop_height
+                return result
+            else:
+                # Shoulders are low -> Likely just "Face Lost" on a sitting person
+                return result
         
         # === 2. DEEP SLUMP (Your original - ENHANCED) ===
         if has_pt(0) and has_shoulders:
