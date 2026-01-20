@@ -82,13 +82,13 @@ class PhoneDetector:
             if len(results) > 0:
                 boxes = results[0].boxes
                 
+                # --- NEW BATCHING LOGIC ---
+                person_crops = []
+                person_metadata = []
+
                 for idx, box in enumerate(boxes):
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     p_cx, p_cy = (x1 + x2) / 2, (y1 + y2) / 2
-                    
-                    # Default status
-                    status = "safe"
-                    color = (0, 255, 0) # Green
                     
                     # --- ZOOM LOGIC ---
                     h, w, _ = frame.shape
@@ -100,21 +100,41 @@ class PhoneDetector:
                     
                     person_crop = frame[cy1:cy2, cx1:cx2]
                     
-                    is_candidate = False
-                    
                     if person_crop.size > 0:
-                        # 2. Second Pass: Run AI on JUST this person
-                        # Look for PHONE class (67) with lower threshold
-                        
-                        # Thread-safe inference
-                        if self.lock:
-                            with self.lock:
-                                crop_results = self.model.predict(person_crop, classes=[self.PHONE_CLASS_ID], conf=0.15, verbose=False)
-                        else:
-                            crop_results = self.model.predict(person_crop, classes=[self.PHONE_CLASS_ID], conf=0.15, verbose=False)
-                        
-                        if len(crop_results) > 0 and len(crop_results[0].boxes) > 0:
-                            is_candidate = True
+                        person_crops.append(person_crop)
+                        # Store context needed for loop
+                        person_metadata.append({
+                            'idx': idx,
+                            'box': (x1, y1, x2, y2),
+                            'center': (p_cx, p_cy)
+                        })
+
+                # 2. Second Pass: Run AI on ALL crops in batch
+                # Look for PHONE class (67) with lower threshold
+                batch_results = []
+                if len(person_crops) > 0:
+                    # Thread-safe inference
+                    if self.lock:
+                        with self.lock:
+                            batch_results = self.model.predict(person_crops, classes=[self.PHONE_CLASS_ID], conf=0.15, verbose=False)
+                    else:
+                        batch_results = self.model.predict(person_crops, classes=[self.PHONE_CLASS_ID], conf=0.15, verbose=False)
+
+                # Process Results
+                for i, meta in enumerate(person_metadata):
+                    idx = meta['idx']
+                    x1, y1, x2, y2 = meta['box']
+                    p_cx, p_cy = meta['center']
+                    person_crop = person_crops[i]
+                    crop_result = batch_results[i]
+
+                    # Default status
+                    status = "safe"
+                    color = (0, 255, 0) # Green
+
+                    is_candidate = False
+                    if len(crop_result) > 0 and len(crop_result.boxes) > 0:
+                        is_candidate = True
                     
                     if is_candidate:
                         # --- TEMPORAL CONSISTENCY ---
