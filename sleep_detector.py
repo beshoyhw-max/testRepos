@@ -42,135 +42,134 @@ class SleepDetector:
 
         self.state = {}
 
-    def process_crop(self, crop, id_key="unknown"):
+    def process_batch(self, crops, id_keys):
         """
-        Analyzes a person crop for sleep signs.
-        Enhanced Order: MediaPipe (Eyes) -> Motion Check -> YOLO (Posture)
+        Batched version of process_crop.
+        Optimizes YOLO Pose inference by running it in a single batch for all fallbacks.
+
+        Args:
+            crops: List of crop images (numpy arrays)
+            id_keys: List of ID strings corresponding to each crop
+
+        Returns:
+            List of (status, info_dict) corresponding to inputs.
         """
-        if crop.size == 0:
-            return "awake", {}
+        results = [None] * len(crops)
+        pose_batch_indices = []
+        pose_batch_crops = []
 
-        current_time = time.time()
-
-        # Initialize State for this ID
-        if id_key not in self.state:
-            self.state[id_key] = {
-                'closed_start': None,
-                'status': 'awake',
-                'last_seen': current_time,
-                'head_positions': [],  # NEW: Track head movement
-                'last_active_time': current_time  # NEW: Track when last active
-            }
-
-        state = self.state[id_key]
-        state['last_seen'] = current_time
-
-        # --- STEP 1: EYES CHECK (MediaPipe) ---
-        # Convert to MP Image
-        rgb_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_crop)
-
-        detection_result = self.detector.detect(mp_image)
-
-        if detection_result.face_landmarks:
-            # Face Found! -> Check Eyes
-            landmarks = detection_result.face_landmarks[0]
-
-            # === NEW: Track Head Position for Movement Analysis ===
-            nose_landmark = landmarks[1]  # Nose tip
-            nose_position = (nose_landmark.x * crop.shape[1], nose_landmark.y * crop.shape[0])
+        # Phase 1: MediaPipe (Sequential, CPU)
+        for i, crop in enumerate(crops):
+            if crop.size == 0:
+                results[i] = ("awake", {})
+                continue
             
-            # Update movement buffer
-            state['head_positions'].append(nose_position)
-            if len(state['head_positions']) > self.MOTION_BUFFER_SIZE:
-                state['head_positions'].pop(0)
+            id_key = id_keys[i]
+            current_time = time.time()
 
-            # Calculate EAR
-            left_ear = self._calculate_ear(landmarks, [33, 160, 158, 133, 153, 144])
-            right_ear = self._calculate_ear(landmarks, [362, 385, 387, 263, 373, 380])
-            avg_ear = (left_ear + right_ear) / 2.0
-
-            # === NEW: Check Head Movement ===
-            is_head_still = self._is_head_still(state['head_positions'])
-
-            # Logic for Eyes Closed
-            if avg_ear < self.EAR_THRESHOLD:
-                # EYES CLOSED
-                if state['closed_start'] is None:
-                    state['closed_start'] = current_time
-
-                duration = current_time - state['closed_start']
-                
-                # === ENHANCED: Combine eyes + movement ===
-                # If eyes closed BUT head moving significantly = likely reading/writing
-                
-                # === SIMPLIFIED: Remove movement check for sleep detection ===
-                # The temporal consistency in detector.py will handle false positives
-                
-                # Eyes closed = likely sleeping (after threshold)
-                if duration > self.SLEEP_TIME_THRESHOLD:
-                    return "sleeping", {
-                        "ear": avg_ear, 
-                        "duration": duration, 
-                        "still": is_head_still,
-                        "source": "mediapipe"
-                    }
-                else:
-                    return "drowsy", {
-                        "ear": avg_ear, 
-                        "duration": duration,
-                        "still": is_head_still,
-                        "source": "mediapipe"
-                    }
-            else:
-                # EYES OPEN -> Awake
-                state['closed_start'] = None
-                state['last_active_time'] = current_time
-                return "awake", {
-                    "ear": avg_ear, 
-                    "still": is_head_still,
-                    "source": "mediapipe"
+            # Initialize State
+            if id_key not in self.state:
+                self.state[id_key] = {
+                    'closed_start': None,
+                    'status': 'awake',
+                    'last_seen': current_time,
+                    'head_positions': [],
+                    'last_active_time': current_time
                 }
 
-        # --- STEP 2: ENHANCED POSTURE CHECK (YOLO) ---
-        # If we are here, MediaPipe failed to find a face (Occlusion / Head Down)
+            state = self.state[id_key]
+            state['last_seen'] = current_time
 
-        # Run inference on crop
-        pose_results = self.pose_model.predict(crop, verbose=False, conf=0.5)
+            # Run MediaPipe
+            rgb_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_crop)
+            detection_result = self.detector.detect(mp_image)
 
-        posture_result = None
-
-        if len(pose_results) > 0 and pose_results[0].keypoints is not None:
-            # Get Keypoints (xy)
-            keypoints_data = pose_results[0].keypoints.xy.cpu().numpy()
-            
-            # Check if we have any keypoints detected
-            if len(keypoints_data) > 0:
-                kpts = keypoints_data[0]  # Shape (17, 2)
-
-                # Check posture with enhanced heuristics
-                posture_result = self._check_sleep_posture(kpts, crop.shape)
+            if detection_result.face_landmarks:
+                # Face Found
+                landmarks = detection_result.face_landmarks[0]
                 
-                if posture_result['is_sleeping']:
-                    return "sleeping", {
-                        "reason": posture_result['reason'], 
-                        "source": "yolo-pose",
-                        "details": posture_result
-                    }
+                # Update Motion
+                nose_landmark = landmarks[1]
+                nose_position = (nose_landmark.x * crop.shape[1], nose_landmark.y * crop.shape[0])
+                state['head_positions'].append(nose_position)
+                if len(state['head_positions']) > self.MOTION_BUFFER_SIZE:
+                    state['head_positions'].pop(0)
+
+                # EAR Check
+                left_ear = self._calculate_ear(landmarks, [33, 160, 158, 133, 153, 144])
+                right_ear = self._calculate_ear(landmarks, [362, 385, 387, 263, 373, 380])
+                avg_ear = (left_ear + right_ear) / 2.0
+                is_head_still = self._is_head_still(state['head_positions'])
                 
-                # === NEW: Check if actively writing/taking notes ===
-                if posture_result['is_writing']:
+                if avg_ear < self.EAR_THRESHOLD:
+                    if state['closed_start'] is None:
+                        state['closed_start'] = current_time
+                    duration = current_time - state['closed_start']
+
+                    if duration > self.SLEEP_TIME_THRESHOLD:
+                        results[i] = ("sleeping", {"ear": avg_ear, "duration": duration, "still": is_head_still, "source": "mediapipe"})
+                    else:
+                        results[i] = ("drowsy", {"ear": avg_ear, "duration": duration, "still": is_head_still, "source": "mediapipe"})
+                else:
+                    state['closed_start'] = None
                     state['last_active_time'] = current_time
-                    return "awake", {
-                        "reason": "writing_detected",
-                        "source": "yolo-pose",
-                        "details": posture_result
-                    }
+                    results[i] = ("awake", {"ear": avg_ear, "still": is_head_still, "source": "mediapipe"})
+            else:
+                # MediaPipe Failed -> Add to Pose Batch
+                pose_batch_indices.append(i)
+                pose_batch_crops.append(crop)
 
-        return "awake", {
-            "reason": "no_face_no_posture", 
-            "source": "fallback"
-        }
+        # Phase 2: YOLO Pose (Batched, GPU/CPU)
+        if pose_batch_crops:
+            # Run inference on all crops at once
+            batch_pose_results = self.pose_model.predict(pose_batch_crops, verbose=False, conf=0.5)
+
+            for j, pose_result in enumerate(batch_pose_results):
+                orig_idx = pose_batch_indices[j]
+                crop_shape = pose_batch_crops[j].shape
+
+                # Logic copied from _process_crop_posture logic
+                posture_result = None
+                status = "awake"
+                info = {"reason": "no_face_no_posture", "source": "fallback"}
+
+                if pose_result.keypoints is not None:
+                     keypoints_data = pose_result.keypoints.xy.cpu().numpy()
+                     if len(keypoints_data) > 0:
+                        kpts = keypoints_data[0]
+                        posture_result = self._check_sleep_posture(kpts, crop_shape)
+
+                        id_key = id_keys[orig_idx]
+                        current_time = time.time()
+                        state = self.state[id_key]
+
+                        if posture_result['is_sleeping']:
+                            status = "sleeping"
+                            info = {
+                                "reason": posture_result['reason'],
+                                "source": "yolo-pose",
+                                "details": posture_result
+                            }
+                        elif posture_result['is_writing']:
+                            state['last_active_time'] = current_time
+                            status = "awake"
+                            info = {
+                                "reason": "writing_detected",
+                                "source": "yolo-pose",
+                                "details": posture_result
+                            }
+
+                results[orig_idx] = (status, info)
+
+        return results
+
+    def process_crop(self, crop, id_key="unknown"):
+        """
+        Legacy wrapper for single crop processing.
+        """
+        results = self.process_batch([crop], [id_key])
+        return results[0]
 
     def _is_head_still(self, positions):
         """

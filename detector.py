@@ -35,15 +35,6 @@ class PhoneDetector:
 
         # Simulated Person Tracking ID
         self.next_person_id = 1
-
-        # Sleep Detection Tracking (Similar to phone detection)
-        # Note: We merge sleep tracking into the main person tracking via detection_streaks to keep IDs consistent if possible
-        # But for now, we keep sleep streaks separate if they are purely based on crop analysis,
-        # however, to satisfy "Person ID" requirement, we should ideally link them.
-        # Given the "batched inference" structure, we are iterating over PERSON crops.
-        # So we can track EVERYTHING on the `detection_streaks` object which represents a "Person".
-        
-        # Removed: self.sleep_streaks (Now we track sleep on the person object)
         
         # State for frame skipping
         self.last_display_data = [] # List of (x1, y1, x2, y2, color, status, text)
@@ -63,12 +54,7 @@ class PhoneDetector:
         if frame_count % skip_frames == 0:
             self.last_display_data = [] # Reset display data
             
-            # Temporary list to track who we saw this frame (for streak management)
-            current_frame_detections = [] 
-            
             # 1. First Pass: Find People in the full room
-            # We filter for PERSON class (0) only
-            
             # Thread-safe inference
             if self.lock:
                 with self.lock:
@@ -76,14 +62,13 @@ class PhoneDetector:
             else:
                 results = self.model.predict(frame, classes=[self.PERSON_CLASS_ID], conf=conf_threshold, verbose=False)
             
-            # Use cpu().numpy() or .tolist() to get coordinates
             if len(results) > 0:
                 boxes = results[0].boxes
                 
-                # --- NEW BATCHING LOGIC ---
                 person_crops = []
                 person_metadata = []
 
+                # Collect crops and resolve tracking
                 for idx, box in enumerate(boxes):
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     p_cx, p_cy = (x1 + x2) / 2, (y1 + y2) / 2
@@ -100,144 +85,159 @@ class PhoneDetector:
                     
                     if person_crop.size > 0:
                         person_crops.append(person_crop)
-                        # Store context needed for loop
+
+                        # --- TRACKING: Resolve ID immediately ---
+                        matched_candidate = None
+                        for candidate in self.detection_streaks:
+                            lx, ly = candidate['center']
+                            dist = math.sqrt((p_cx - lx)**2 + (p_cy - ly)**2)
+                            if dist < 100:
+                                matched_candidate = candidate
+                                candidate['center'] = (p_cx, p_cy)
+                                candidate['last_seen'] = current_time
+                                break
+
+                        if matched_candidate is None:
+                            matched_candidate = {
+                                'id': self.next_person_id,
+                                'center': (p_cx, p_cy),
+                                'streak_phone': 0,
+                                'streak_sleep': 0,
+                                'last_seen': current_time,
+                                'cooldowns': {'phone': 0, 'sleep': 0}
+                            }
+                            self.next_person_id += 1
+                            self.detection_streaks.append(matched_candidate)
+
+                        # Store context
                         person_metadata.append({
                             'idx': idx,
                             'box': (x1, y1, x2, y2),
-                            'center': (p_cx, p_cy)
+                            'center': (p_cx, p_cy),
+                            'candidate': matched_candidate
                         })
 
-                # 2. Second Pass: Run AI on ALL crops in batch
-                # Look for PHONE class (67) with lower threshold
-                batch_results = []
+                # 2. Second Pass: Run AI on ALL crops in batch (PHONE)
+                batch_phone_results = []
                 if len(person_crops) > 0:
-                    # Thread-safe inference
                     if self.lock:
                         with self.lock:
-                            batch_results = self.model.predict(person_crops, classes=[self.PHONE_CLASS_ID], conf=0.15, verbose=False)
+                            batch_phone_results = self.model.predict(person_crops, classes=[self.PHONE_CLASS_ID], conf=0.15, verbose=False)
                     else:
-                        batch_results = self.model.predict(person_crops, classes=[self.PHONE_CLASS_ID], conf=0.15, verbose=False)
+                        batch_phone_results = self.model.predict(person_crops, classes=[self.PHONE_CLASS_ID], conf=0.15, verbose=False)
 
-                # Process Results
+                # 3. Third Pass: Identify Sleep Candidates and Batch Sleep
+                sleep_crops = []
+                sleep_ids = []
+                sleep_map_indices = [] # Map index in sleep_results back to person_metadata index
+
                 for i, meta in enumerate(person_metadata):
-                    idx = meta['idx']
-                    x1, y1, x2, y2 = meta['box']
-                    p_cx, p_cy = meta['center']
-                    person_crop = person_crops[i]
-                    crop_result = batch_results[i]
+                    crop_result = batch_phone_results[i]
+                    candidate = meta['candidate']
 
-                    # Default status
-                    status = "safe"
-                    color = (0, 255, 0) # Green
-                    display_text = ""
-
-                    # Check Phone Detection
+                    # Check Phone
                     has_phone = False
                     if len(crop_result) > 0 and len(crop_result.boxes) > 0:
                         has_phone = True
 
-                    # --- TEMPORAL CONSISTENCY & TRACKING ---
-                    # Match with existing streak (simulated tracking)
-                    matched_candidate = None
-                    for candidate in self.detection_streaks:
-                        lx, ly = candidate['center']
-                        dist = math.sqrt((p_cx - lx)**2 + (p_cy - ly)**2)
-
-                        # Match if within 100 pixels
-                        if dist < 100:
-                            matched_candidate = candidate
-                            # Update Position
-                            candidate['center'] = (p_cx, p_cy)
-                            candidate['last_seen'] = current_time
-                            break
-                    
-                    if matched_candidate is None:
-                        # New Person
-                        matched_candidate = {
-                            'id': self.next_person_id,
-                            'center': (p_cx, p_cy),
-                            'streak_phone': 0,
-                            'streak_sleep': 0,
-                            'last_seen': current_time,
-                            'cooldowns': {'phone': 0, 'sleep': 0}
-                        }
-                        self.next_person_id += 1
-                        self.detection_streaks.append(matched_candidate)
-
-                    # Mark as processed
-                    # (We don't need a separate list if we update last_seen)
-
-                    # --- LOGIC: PHONE ---
+                    # Update Phone Streak
                     if has_phone:
-                        matched_candidate['streak_phone'] += 1
+                        candidate['streak_phone'] += 1
                     else:
-                        matched_candidate['streak_phone'] = max(0, matched_candidate['streak_phone'] - 1)
+                        candidate['streak_phone'] = max(0, candidate['streak_phone'] - 1)
                         
-                    # Check Phone Threshold
-                    if matched_candidate['streak_phone'] >= self.CONSISTENCY_THRESHOLD:
+                    # Determine Temporary Status (Texting takes priority)
+                    is_texting = candidate['streak_phone'] >= self.CONSISTENCY_THRESHOLD
+
+                    if not is_texting:
+                        # Candidate for Sleep Detection
+                        sleep_crops.append(person_crops[i])
+                        sleep_ids.append(f"{camera_name}_pid_{candidate['id']}")
+                        sleep_map_indices.append(i)
+
+                # Batch Sleep Inference
+                batch_sleep_results = []
+                if sleep_crops:
+                    batch_sleep_results = self.sleep_detector.process_batch(sleep_crops, sleep_ids)
+
+                # 4. Final Pass: Merge Results and Update State
+                for i, meta in enumerate(person_metadata):
+                    candidate = meta['candidate']
+                    x1, y1, x2, y2 = meta['box']
+
+                    status = "safe"
+                    color = (0, 255, 0) # Green
+                    display_text = ""
+
+                    # --- PHONE LOGIC ---
+                    if candidate['streak_phone'] >= self.CONSISTENCY_THRESHOLD:
                         status = "texting"
                         color = (0, 0, 255) # Red
                         global_status = "texting"
-                        display_text = f"P{matched_candidate['id']}: PHONE"
+                        display_text = f"P{candidate['id']}: PHONE"
 
-                        # Check Cooldown
+                        # Cooldown Save
                         if save_screenshots:
-                            last_shot = matched_candidate['cooldowns']['phone']
-                            if (current_time - last_shot) > 120: # 120s Cooldown
-                                matched_candidate['cooldowns']['phone'] = current_time
-                                self.save_evidence(frame, x1, y1, x2, y2, camera_name, "PHONE", matched_candidate['id'])
+                            last_shot = candidate['cooldowns']['phone']
+                            if (current_time - last_shot) > 120:
+                                candidate['cooldowns']['phone'] = current_time
+                                self.save_evidence(frame, x1, y1, x2, y2, camera_name, "PHONE", candidate['id'])
                                 screenshot_saved_global = True
 
-                    # --- LOGIC: SLEEP (Only if not texting) ---
-                    if status != "texting" and person_crop.size > 0:
-                        # Use person ID for sleep detector state key if possible, or fallback
-                        sleep_key = f"{camera_name}_pid_{matched_candidate['id']}"
-                        sleep_status, sleep_info = self.sleep_detector.process_crop(person_crop, id_key=sleep_key)
-                        
-                        if sleep_status == "sleeping":
-                            matched_candidate['streak_sleep'] += 1
-                            
-                            # Check Sleep Threshold
-                            if matched_candidate['streak_sleep'] >= self.SLEEP_CONSISTENCY_THRESHOLD:
-                                status = "sleeping"
-                                color = (255, 0, 0) # Blue (BGR)
-                                if global_status != "texting":
-                                    global_status = "sleeping"
-                                display_text = f"P{matched_candidate['id']}: SLEEP"
+                        # Reset Sleep Streak if Texting
+                        candidate['streak_sleep'] = max(0, candidate['streak_sleep'] - 1)
 
-                                # Check Cooldown
-                                if save_screenshots:
-                                    last_shot = matched_candidate['cooldowns']['sleep']
-                                    if (current_time - last_shot) > 120:
-                                        matched_candidate['cooldowns']['sleep'] = current_time
-                                        self.save_evidence(frame, x1, y1, x2, y2, camera_name, "SLEEP", matched_candidate['id'])
-                                        screenshot_saved_global = True
-                        else:
-                             matched_candidate['streak_sleep'] = max(0, matched_candidate['streak_sleep'] - 1)
-                             if sleep_status == "drowsy":
-                                 color = (0, 255, 255) # Yellow
+                    # --- SLEEP LOGIC ---
                     else:
-                        # If texting, reset sleep streak? Or keep it?
-                        # Usually if texting, you aren't sleeping.
-                        matched_candidate['streak_sleep'] = max(0, matched_candidate['streak_sleep'] - 1)
+                        # Retrieve result from batch if it exists
+                        # Find if this 'i' was in the sleep map
+                        try:
+                            s_idx = sleep_map_indices.index(i)
+                            sleep_res = batch_sleep_results[s_idx]
 
-                    # Store for display
+                            if sleep_res:
+                                sleep_status, sleep_info = sleep_res
+
+                                if sleep_status == "sleeping":
+                                    candidate['streak_sleep'] += 1
+
+                                    if candidate['streak_sleep'] >= self.SLEEP_CONSISTENCY_THRESHOLD:
+                                        status = "sleeping"
+                                        color = (255, 0, 0) # Blue
+                                        if global_status != "texting":
+                                            global_status = "sleeping"
+                                        display_text = f"P{candidate['id']}: SLEEP"
+
+                                        if save_screenshots:
+                                            last_shot = candidate['cooldowns']['sleep']
+                                            if (current_time - last_shot) > 120:
+                                                candidate['cooldowns']['sleep'] = current_time
+                                                self.save_evidence(frame, x1, y1, x2, y2, camera_name, "SLEEP", candidate['id'])
+                                                screenshot_saved_global = True
+                                else:
+                                    candidate['streak_sleep'] = max(0, candidate['streak_sleep'] - 1)
+                                    if sleep_status == "drowsy":
+                                        color = (0, 255, 255) # Yellow
+                            else:
+                                 candidate['streak_sleep'] = max(0, candidate['streak_sleep'] - 1)
+                        except ValueError:
+                            # Not in sleep list (shouldn't happen if logic above holds, but safe fallback)
+                            pass
+
                     self.last_display_data.append((x1, y1, x2, y2, color, status, display_text))
 
             # --- PRUNING STREAKS ---
-            # Remove streaks that were not matched in this frame (person left)
             self.detection_streaks = [
                 d for d in self.detection_streaks 
-                if (current_time - d['last_seen']) < 1.0 # 1 second tolerance
+                if (current_time - d['last_seen']) < 1.0
             ]
 
-        # --- DRAWING (Every Frame using cached data) ---
+        # --- DRAWING ---
         for (x1, y1, x2, y2, color, status, text) in self.last_display_data:
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             if text:
                  cv2.putText(frame, text, (x1, y1 - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-            # Global status update from cache if not updated in this frame (because skip_frames)
             if status == "texting":
                 global_status = "texting"
             elif status == "sleeping" and global_status != "texting":
