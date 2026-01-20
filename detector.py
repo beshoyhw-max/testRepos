@@ -227,9 +227,10 @@ class PhoneDetector:
                     self.last_display_data.append((x1, y1, x2, y2, color, status, display_text))
 
             # --- PRUNING STREAKS ---
+            # Increased tolerance to 5.0s to prevent ID switching on slow inference or dropped frames
             self.detection_streaks = [
                 d for d in self.detection_streaks 
-                if (current_time - d['last_seen']) < 1.0
+                if (current_time - d['last_seen']) < 5.0
             ]
 
         # --- DRAWING ---

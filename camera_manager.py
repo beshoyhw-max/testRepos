@@ -155,7 +155,7 @@ class CameraThread(threading.Thread):
                 processed_frame, status, is_saved = self.detector.process_frame(
                     raw_frame, 
                     frame_count, 
-                    skip_frames=3, # Still skip internally if needed for performance
+                    skip_frames=5, # Increased skip to 5 to reduce CPU load and improve tracking stability
                     save_screenshots=True,
                     conf_threshold=self.conf_threshold,
                     camera_name=self.camera_name
