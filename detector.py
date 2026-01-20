@@ -145,8 +145,14 @@ class PhoneDetector:
                                 self.streaks[streak_key] = self.streaks.get(streak_key, 0) + 1
                                 current_streak_val = self.streaks[streak_key]
 
-                            # Reset streaks for non-active violations (Optional, but good for precision)
-                            # (Skipping for performance, periodic cleanup handles staleness)
+                            # Reset streaks for non-active violations
+                            # If we are currently "texting", we should reset the "sleeping" streak for this person to 0
+                            # If we are "safe" (violation_type is None), we reset ALL streaks for this person.
+
+                            possible_types = ["texting", "sleeping"]
+                            for v_type in possible_types:
+                                if v_type != violation_type:
+                                     self.streaks[(track_id, v_type)] = 0
 
                             # --- COOLDOWN & SAVING ---
                             # Only save if:
