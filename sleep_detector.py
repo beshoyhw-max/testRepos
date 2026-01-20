@@ -223,13 +223,22 @@ class SleepDetector:
         crop_height = crop_shape[0]
         crop_width = crop_shape[1]
         
-        # === 1. HEAD BURIED / DOWN (Your original - KEEP) ===
+        # === 1. HEAD BURIED / DOWN ===
+        # REVISED: Previous "No Face = Sleep" logic caused false positives
+        # when MediaPipe failed or person turned away.
+        # We now require ears to be missing too, or just consider it 'drowsy'/'unknown'
+        # unless other strong signals exist.
+
         has_shoulders = has_pt(5) and has_pt(6)
-        has_face = has_pt(0) or has_pt(1) or has_pt(2)
+        # Expanded face check to include ears (3, 4)
+        has_face = has_pt(0) or has_pt(1) or has_pt(2) or has_pt(3) or has_pt(4)
         
+        # If we have shoulders but NO face parts at all:
+        # It could be sleep (head buried in arms) OR back to camera OR model failure.
+        # Safest is to NOT assume sleep immediately to avoid false positives.
         if has_shoulders and not has_face:
-            result['is_sleeping'] = True
-            result['reason'] = "head_buried"
+            # We return False for sleep, but we could log it as "posture_unknown"
+            # This fixes the "Wide Awake but MediaPipe failed" bug.
             return result
         
         # === 2. DEEP SLUMP (Your original - ENHANCED) ===
