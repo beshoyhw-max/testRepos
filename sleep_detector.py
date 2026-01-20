@@ -59,7 +59,8 @@ class SleepDetector:
                 'status': 'awake',
                 'last_seen': current_time,
                 'head_positions': [],  # NEW: Track head movement
-                'last_active_time': current_time  # NEW: Track when last active
+                'last_active_time': current_time,  # NEW: Track when last active
+                'ear_history': [] # NEW: History for dynamic EAR calibration
             }
 
         state = self.state[id_key]
@@ -90,11 +91,27 @@ class SleepDetector:
             right_ear = self._calculate_ear(landmarks, [362, 385, 387, 263, 373, 380])
             avg_ear = (left_ear + right_ear) / 2.0
 
+            # Update EAR History for Dynamic Calibration
+            if 'ear_history' not in state: state['ear_history'] = []
+            state['ear_history'].append(avg_ear)
+            if len(state['ear_history']) > 300: # Keep last ~10-30 seconds
+                state['ear_history'].pop(0)
+
+            # Calculate Dynamic Threshold
+            # Use 90th percentile to estimate "Open Eyes" baseline, effectively handling naturally small eyes
+            current_threshold = self.EAR_THRESHOLD # Default
+            if len(state['ear_history']) > 10:
+                baseline_ear = np.percentile(state['ear_history'], 90)
+                # Threshold is 80% of their "Open" state, but clamped
+                # Max 0.22 (Standard), Min 0.12 (Absolute closed)
+                dynamic = baseline_ear * 0.8
+                current_threshold = min(self.EAR_THRESHOLD, max(0.12, dynamic))
+
             # === NEW: Check Head Movement ===
             is_head_still = self._is_head_still(state['head_positions'])
 
             # Logic for Eyes Closed
-            if avg_ear < self.EAR_THRESHOLD:
+            if avg_ear < current_threshold:
                 # EYES CLOSED
                 if state['closed_start'] is None:
                     state['closed_start'] = current_time
