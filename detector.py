@@ -455,9 +455,10 @@ class PhoneDetector:
                     if ph_id in self.static_objects:
                         cost += 5.0  # Strong penalty for known static objects
 
-                        # EXCEPTION: Pickup detection (wrist very close)
-                        if raw_dist < person_height * 0.05:  # Within 5% of height
-                            cost -= 5.0  # Cancel penalty - user picking it up
+                        # EXCEPTION: Pickup detection (wrist close)
+                        # FIXED: Increased threshold from 5% to 15% to catch stationary phones in hand
+                        if raw_dist < person_height * 0.15:
+                            cost -= 5.0  # Cancel penalty
 
                     # ==========================================
                     # Optimization 3: Motion Vector Alignment
@@ -522,6 +523,15 @@ class PhoneDetector:
                                     # Texting requires bent elbow (< 120°)
                                     if angle > 150:  # Arm too straight
                                         cost += 5.0  # Strong penalty
+
+                                    # BIOMECHANICAL OVERRIDE for Static Phones
+                                    # If arm is bent (<120) and wrist is reasonably close (<25%),
+                                    # we assume they are using a stationary phone (e.g., on desk)
+                                    if angle < 120 and raw_dist < person_height * 0.25:
+                                        if ph_id in self.static_objects:
+                                            # If we haven't already cancelled the penalty in step 2
+                                            if raw_dist >= person_height * 0.15: # If step 2 failed
+                                                cost -= 5.0 # Cancel static penalty
 
                     # ==========================================
                     # Overhead Phone Penalty
