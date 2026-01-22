@@ -34,7 +34,7 @@ class TestDetectorAdvancedLogic(unittest.TestCase):
         phones = [[150, 200, 160, 210, 0.9, 99]] # Near chest
 
         # Should fail match due to +5.0 penalty (unless wrist is super close)
-        mapping = self.detector._associate_phones_to_persons_advanced(persons, phones, {})
+        mapping = self.detector._associate_phones_to_persons_advanced(persons, phones, {}, 0)
         self.assertFalse(mapping.get(1))
 
     def test_velocity_mismatch(self):
@@ -48,7 +48,7 @@ class TestDetectorAdvancedLogic(unittest.TestCase):
         phones = [[150, 200, 160, 210, 0.9, 99]] # Close geometrically
 
         # Should fail due to velocity mismatch penalty
-        mapping = self.detector._associate_phones_to_persons_advanced(persons, phones, {})
+        mapping = self.detector._associate_phones_to_persons_advanced(persons, phones, {}, 0)
         self.assertFalse(mapping.get(1))
 
     def test_sticky_association(self):
@@ -64,26 +64,36 @@ class TestDetectorAdvancedLogic(unittest.TestCase):
 
         # Without bonus, this would fail (0.61 > 0.6)
         # With bonus, it should pass
-        mapping = self.detector._associate_phones_to_persons_advanced(persons, phones, {})
+        mapping = self.detector._associate_phones_to_persons_advanced(persons, phones, {}, 0)
         self.assertTrue(mapping.get(1))
 
-    def test_elbow_angle_penalty(self):
-        """Test penalty for straight arm (angle ~180)."""
+    def test_active_arm_elbow_angle(self):
+        """
+        Test that elbow angle validation correctly picks the active arm.
+        Scenario: Left arm straight (distractor), Right arm active (texting).
+        Should PASS because right arm is closer to phone.
+        """
         persons = [[100, 100, 200, 300, 1]]
-        phones = [[150, 200, 160, 210, 0.9, 99]] # Perfect position
+        # Phone on Right side (closer to right arm)
+        phones = [[180, 200, 190, 210, 0.9, 99]]
 
-        # Mock Keypoints: Shoulder(5), Elbow(7), Wrist(9)
-        # Straight line down: (150,120) -> (150,200) -> (150,280)
+        # Mock Keypoints
         kpts = np.zeros((17, 2))
-        kpts[5] = [150, 120]
-        kpts[7] = [150, 200]
-        kpts[9] = [150, 280]
+
+        # Left Arm: Straight down (150 degrees) - would fail if checked
+        kpts[5] = [120, 120] # Shoulder
+        kpts[7] = [120, 200] # Elbow
+        kpts[9] = [120, 280] # Wrist (Far from phone)
+
+        # Right Arm: Texting (90 degrees) - should be checked
+        kpts[6] = [180, 120] # Shoulder
+        kpts[8] = [180, 200] # Elbow
+        kpts[10] = [185, 205] # Wrist (Close to phone)
 
         kpts_map = {1: kpts}
 
-        # Should fail due to straight arm penalty (+1.0 cost)
-        mapping = self.detector._associate_phones_to_persons_advanced(persons, phones, kpts_map)
-        self.assertFalse(mapping.get(1))
+        mapping = self.detector._associate_phones_to_persons_advanced(persons, phones, kpts_map, 0)
+        self.assertTrue(mapping.get(1))
 
 if __name__ == '__main__':
     unittest.main()

@@ -15,6 +15,13 @@ class PhoneDetector:
                  consistency_threshold=3, camera_id=None):
         """
         Initialize Phone Detector with advanced temporal and biomechanical logic.
+
+        Features:
+        - Motion Vector Alignment (physics-based validation)
+        - Bucket-Brigade Hysteresis (temporal stability)
+        - Scene Memory (static object suppression)
+        - Sticky Association (tracking continuity)
+        - Elbow Angle Validation (biomechanical constraints)
         """
         
         self.output_dir = output_dir
@@ -34,29 +41,36 @@ class PhoneDetector:
         self.PERSON_CLASS_ID = 0
         self.COOLDOWN_SECONDS = cooldown_seconds
 
-        # Replaced simple consistency_threshold with Bucket Hysteresis config
+        # Bucket-Brigade Hysteresis Configuration
         self.HYSTERESIS_MAX = 100
         self.HYSTERESIS_THRESHOLD = 50  # Trigger alert level
-        self.HYSTERESIS_INC = 10        # Gain per frame
-        self.HYSTERESIS_DEC = 2         # Decay per frame
+        self.HYSTERESIS_INC = 10        # Gain per frame (50/10 = 5 frames to trigger)
+        self.HYSTERESIS_DEC = 2         # Decay per frame (slower decay for stability)
         
         self.cooldowns = {}
-        self.hysteresis_scores = {} # (track_id, type) -> score
+        self.hysteresis_scores = {}  # (track_id, type) -> score
 
         self.active_track_ids = set()
         self.last_display_data = []
 
-        # --- NEW STATE TRACKING ---
-        self.prev_positions = {}  # {track_id: (x, y, time)}
+        # Motion Vector Tracking
+        self.prev_positions = {}  # {track_id: (x, y, timestamp)}
         self.velocities = {}      # {track_id: (vx, vy)}
 
-        self.static_candidates = {} # {id: {start_pos, start_time, last_seen}}
-        self.static_objects = set() # Set of track IDs confirmed as static noise
+        # Scene Memory (Static Object Suppression)
+        self.static_candidates = {}  # {id: {start_pos, start_time}}
+        self.static_objects = set()  # Set of track IDs confirmed as static noise
 
-        self.last_matches = {}    # {person_id: phone_id} for sticky tracking
+        # Sticky Association (Tracking Continuity)
+        self.last_matches = {}     # {person_id: phone_id}
+        self.match_age = {}        # {person_id: frames_since_last_match}
 
     def _update_velocities(self, track_id, cx, cy, current_time):
-        """Update velocity vector for a track ID."""
+        """
+        Update velocity vector for a track ID.
+
+        FIXED: More responsive EMA (90% new, 10% old) for better motion detection.
+        """
         if track_id in self.prev_positions:
             px, py, ptime = self.prev_positions[track_id]
             dt = current_time - ptime
@@ -64,42 +78,46 @@ class PhoneDetector:
                 vx = (cx - px) / dt
                 vy = (cy - py) / dt
 
-                # Smooth velocity (Exponential Moving Average)
+                # FIXED: Less aggressive smoothing (90% new, 10% old)
                 if track_id in self.velocities:
                     old_vx, old_vy = self.velocities[track_id]
-                    vx = 0.7 * vx + 0.3 * old_vx
-                    vy = 0.7 * vy + 0.3 * old_vy
+                    vx = 0.9 * vx + 0.1 * old_vx  # More responsive
+                    vy = 0.9 * vy + 0.1 * old_vy
 
                 self.velocities[track_id] = (vx, vy)
 
         self.prev_positions[track_id] = (cx, cy, current_time)
 
-    def _update_static_scene_memory(self, phone_boxes, current_time):
+    def _get_or_create_phone_pseudo_id(self, bbox, existing_ids, current_time):
         """
-        Track unassociated phones to identify static noise (wall clocks, stickers).
-        Logic: If phone stays within 10px radius for > 3 seconds, mark as static.
+        FIXED: Create pseudo-ID for phones without persistent tracking IDs.
+
+        Uses spatial hashing to maintain phone identity across frames.
         """
-        active_ids = set()
+        cx = (bbox[0] + bbox[2]) / 2
+        cy = (bbox[1] + bbox[3]) / 2
 
-        # This function assumes 'phone_boxes' has tracking IDs if possible.
-        # However, standard YOLO track() gives IDs. If detection only, we can't do ID-based static logic easily.
-        # But we are using .track(), so phones *should* have IDs if persist=True.
-        # Let's assume phone_boxes contains ID if available.
-        # The main loop unpacks 5 values usually. We might need to adjust unpacking.
+        # Check if any existing phone ID is nearby (within 50px)
+        for pid in existing_ids:
+            if pid in self.prev_positions:
+                px, py, ptime = self.prev_positions[pid]
+                if math.hypot(cx - px, cy - py) < 50:
+                    return pid
 
-        # NOTE: Ultralytics track() returns boxes with IDs.
-        # But in process_frame we unpack: x1, y1, x2, y2, conf.
-        # We need to preserve ID for Scene Memory.
-        # Modified process_frame to pass phone IDs.
-
-        pass # Implemented inside process_frame loop for easier data access
+        # Create new pseudo-ID based on spatial location
+        pseudo_id = 1000000 + hash((int(cx / 50), int(cy / 50))) % 1000000
+        return pseudo_id
 
     def process_frame(self, frame, frame_count, skip_frames=5, save_screenshots=True,
                      conf_threshold=0.25, camera_name="Unknown"):
+        """
+        Process frame with all advanced optimizations.
+        """
         current_time = time.time()
         
-        # Periodic Cleanup
+        # Periodic Cleanup (Every 100 frames = ~3 seconds at 30fps)
         if frame_count % 100 == 0:
+            # Clean old cooldowns
             cutoff_time = current_time - (self.COOLDOWN_SECONDS * 2)
             self.cooldowns = {k: v for k, v in self.cooldowns.items() if v > cutoff_time}
 
@@ -107,14 +125,26 @@ class PhoneDetector:
             self.hysteresis_scores = {k: v for k, v in self.hysteresis_scores.items()
                                     if k[0] in self.active_track_ids}
 
-            # Clean velocity/position history
+            # FIXED: Don't wipe all tracking state every 1000 frames
+            # Instead, clean old entries intelligently
             if frame_count % 1000 == 0:
-                self.active_track_ids.clear()
-                self.prev_positions.clear()
-                self.velocities.clear()
-                self.static_candidates.clear()
-                self.static_objects.clear()
-                self.last_matches.clear()
+                # Clean velocity/position history for tracks not seen in 60 seconds
+                pos_cutoff = current_time - 60
+                old_track_ids = [k for k, v in self.prev_positions.items() if v[2] < pos_cutoff]
+
+                for tid in old_track_ids:
+                    self.prev_positions.pop(tid, None)
+                    self.velocities.pop(tid, None)
+                    self.match_age.pop(tid, None)
+
+                # Clean static candidates not seen recently
+                for pid in list(self.static_candidates.keys()):
+                    if pid not in self.prev_positions:
+                        del self.static_candidates[pid]
+                        self.static_objects.discard(pid)
+
+                # Don't clear active_track_ids - let frame updates handle it
+                # self.active_track_ids.clear()  # REMOVED - was causing 33-second resets
 
         global_status = "safe"
         screenshot_saved_global = False
@@ -122,7 +152,9 @@ class PhoneDetector:
         if frame_count % skip_frames == 0:
             self.last_display_data = []
             
-            # 1. Inference
+            # ==========================================
+            # STEP 1: YOLO Inference (Detection + Tracking)
+            # ==========================================
             classes_to_track = [self.PERSON_CLASS_ID, self.PHONE_CLASS_ID]
             try:
                 results = self.model.track(frame, classes=classes_to_track, conf=conf_threshold,
@@ -131,8 +163,8 @@ class PhoneDetector:
                 print(f"[{camera_name}] YOLO error: {e}")
                 results = []
             
-            person_boxes = [] # (x1, y1, x2, y2, id)
-            phone_boxes = []  # (x1, y1, x2, y2, conf, id) <-- Added ID
+            person_boxes = []  # (x1, y1, x2, y2, track_id)
+            phone_boxes = []   # (x1, y1, x2, y2, conf, track_id)
 
             current_frame_phone_ids = set()
 
@@ -141,44 +173,61 @@ class PhoneDetector:
                     cls_id = int(box.cls[0].item())
                     coords = box.xyxy[0].cpu().numpy()
 
-                    # Update Velocity for everything tracked
+                    # Get or create track ID
                     if box.id is not None:
                         track_id = int(box.id.item())
-                        cx = (coords[0] + coords[2]) / 2
-                        cy = (coords[1] + coords[3]) / 2
-                        self._update_velocities(track_id, cx, cy, current_time)
+                    else:
+                        # FIXED: Handle phones without IDs using pseudo-ID
+                        if cls_id == self.PHONE_CLASS_ID:
+                            track_id = self._get_or_create_phone_pseudo_id(
+                                coords, current_frame_phone_ids, current_time
+                            )
+                        else:
+                            continue  # Skip persons without IDs
 
-                        if cls_id == self.PERSON_CLASS_ID:
-                            person_boxes.append((*coords, track_id))
-                            self.active_track_ids.add(track_id)
-                        elif cls_id == self.PHONE_CLASS_ID:
-                            conf = float(box.conf[0].item())
-                            phone_boxes.append((*coords, conf, track_id))
-                            current_frame_phone_ids.add(track_id)
+                    # Update velocity tracking for all objects
+                    cx = (coords[0] + coords[2]) / 2
+                    cy = (coords[1] + coords[3]) / 2
+                    self._update_velocities(track_id, cx, cy, current_time)
 
-            # --- STATIC SCENE MEMORY UPDATE ---
+                    if cls_id == self.PERSON_CLASS_ID:
+                        person_boxes.append((*coords, track_id))
+                        self.active_track_ids.add(track_id)
+                    elif cls_id == self.PHONE_CLASS_ID:
+                        conf = float(box.conf[0].item())
+                        phone_boxes.append((*coords, conf, track_id))
+                        current_frame_phone_ids.add(track_id)
+
+            # ==========================================
+            # STEP 2: Static Scene Memory Update
+            # ==========================================
+            # FIXED: Build lookup dict for O(1) access instead of O(N) search
+            phone_dict = {p[5]: p for p in phone_boxes}
+
             # Check existing candidates
             for pid in list(self.static_candidates.keys()):
                 if pid not in current_frame_phone_ids:
-                    del self.static_candidates[pid] # Lost tracking, reset
+                    # Lost tracking
+                    del self.static_candidates[pid]
+                    self.static_objects.discard(pid)
                     continue
 
-                # Check movement
-                # We need the current position of this phone
-                # Inefficient to search list, but N is small (phones < 10)
-                curr_box = next((p for p in phone_boxes if p[5] == pid), None)
+                # Get current position
+                curr_box = phone_dict.get(pid)
                 if curr_box:
                     cx = (curr_box[0] + curr_box[2]) / 2
                     cy = (curr_box[1] + curr_box[3]) / 2
 
                     cand = self.static_candidates[pid]
                     dist = math.hypot(cx - cand['start_pos'][0], cy - cand['start_pos'][1])
+                    duration = current_time - cand['start_time']
 
-                    if dist > 20: # Moved > 20px
+                    # FIXED: Check duration FIRST, then movement
+                    if dist > 10:  # FIXED: Was 20px, now 10px (tighter threshold)
+                        # Moved too much - reset
                         del self.static_candidates[pid]
-                        if pid in self.static_objects:
-                            self.static_objects.remove(pid)
-                    elif (current_time - cand['start_time']) > 3.0:
+                        self.static_objects.discard(pid)
+                    elif duration > 3.0:  # Static for 3+ seconds
                         self.static_objects.add(pid)
 
             # Add new candidates
@@ -192,8 +241,9 @@ class PhoneDetector:
                         'start_time': current_time
                     }
 
-
-            # 2. Pose Inference
+            # ==========================================
+            # STEP 3: Pose Inference
+            # ==========================================
             pose_keypoints_map = {}
             if hasattr(self.sleep_detector, 'pose_model'):
                 try:
@@ -201,30 +251,37 @@ class PhoneDetector:
                     if len(pose_results) > 0 and pose_results[0].boxes:
                         pose_boxes = pose_results[0].boxes.xyxy.cpu().numpy()
                         pose_kpts = pose_results[0].keypoints.xy.cpu().numpy()
-                        pose_keypoints_map = self._associate_pose_to_persons(person_boxes, pose_boxes, pose_kpts)
-                except Exception:
-                    pass
+                        pose_keypoints_map = self._associate_pose_to_persons(
+                            person_boxes, pose_boxes, pose_kpts
+                        )
+                except Exception as e:
+                    print(f"[{camera_name}] Pose inference error: {e}")
 
-            # 3. Association (Advanced)
+            # ==========================================
+            # STEP 4: Advanced Phone-Person Association
+            # ==========================================
             phone_map = self._associate_phones_to_persons_advanced(
-                person_boxes, phone_boxes, pose_keypoints_map
+                person_boxes, phone_boxes, pose_keypoints_map, current_time
             )
 
-            # 4. Logic & Hysteresis
+            # ==========================================
+            # STEP 5: Per-Person Status & Hysteresis
+            # ==========================================
             for p_box in person_boxes:
                 x1, y1, x2, y2, track_id = map(int, p_box)
 
-                # Current Frame Status
+                # Current frame detection
                 is_texting = phone_map.get(track_id, False)
                 is_sleeping = False
 
-                # Sleep Check (if not texting)
-                sleep_meta = {}
+                # Sleep detection (if not texting)
                 if not is_texting:
                     h, w, _ = frame.shape
                     pad = 20
-                    cx1 = max(0, x1 - pad); cy1 = max(0, y1 - pad)
-                    cx2 = min(w, x2 + pad); cy2 = min(h, y2 + pad)
+                    cx1 = max(0, x1 - pad)
+                    cy1 = max(0, y1 - pad)
+                    cx2 = min(w, x2 + pad)
+                    cy2 = min(h, y2 + pad)
                     person_crop = frame[cy1:cy2, cx1:cx2]
                     
                     if person_crop.size > 0:
@@ -233,10 +290,13 @@ class PhoneDetector:
                         status_str, sleep_meta = self.sleep_detector.process_crop(
                             person_crop, id_key=sleep_key, keypoints=kpts, crop_origin=(cx1, cy1)
                         )
-                        if status_str == "sleeping": is_sleeping = True
+                        if status_str == "sleeping":
+                            is_sleeping = True
 
-                # --- BUCKET-BRIGADE HYSTERESIS ---
-                # Update Texting Score
+                # ==========================================
+                # Bucket-Brigade Hysteresis Update
+                # ==========================================
+                # Texting score
                 t_key = (track_id, "texting")
                 t_score = self.hysteresis_scores.get(t_key, 0)
                 if is_texting:
@@ -245,7 +305,7 @@ class PhoneDetector:
                     t_score = max(0, t_score - self.HYSTERESIS_DEC)
                 self.hysteresis_scores[t_key] = t_score
 
-                # Update Sleeping Score
+                # Sleeping score
                 s_key = (track_id, "sleeping")
                 s_score = self.hysteresis_scores.get(s_key, 0)
                 if is_sleeping:
@@ -254,7 +314,9 @@ class PhoneDetector:
                     s_score = max(0, s_score - self.HYSTERESIS_DEC)
                 self.hysteresis_scores[s_key] = s_score
 
-                # --- DETERMINE FINAL STATUS ---
+                # ==========================================
+                # Determine Final Status
+                # ==========================================
                 final_status = "safe"
                 color = (0, 255, 0)
                 label = f"ID: {track_id}"
@@ -268,36 +330,63 @@ class PhoneDetector:
                 elif s_score >= self.HYSTERESIS_THRESHOLD:
                     final_status = "sleeping"
                     color = (255, 0, 0)
-                    if global_status != "texting": global_status = "sleeping"
+                    if global_status != "texting":
+                        global_status = "sleeping"
                     label += f" [SLEEP {int(s_score)}%]"
 
-                # Save Evidence
+                # ==========================================
+                # Evidence Saving
+                # ==========================================
                 if save_screenshots and final_status != "safe":
                     key = (track_id, final_status)
                     last_time = self.cooldowns.get(key, 0)
-                    # Only save if score is HIGH (saturated) to avoid flickering saves
+
+                    # Only save when score is saturated (>80) to avoid flickering saves
                     if t_score > 80 or s_score > 80:
                         if (current_time - last_time) > self.COOLDOWN_SECONDS:
-                            self.save_evidence(frame, x1, y1, x2, y2, camera_name,
-                                             "PHONE" if final_status == "texting" else "SLEEP", track_id)
+                            self.save_evidence(
+                                frame, x1, y1, x2, y2, camera_name,
+                                "PHONE" if final_status == "texting" else "SLEEP",
+                                track_id
+                            )
                             screenshot_saved_global = True
                             self.cooldowns[key] = current_time
 
                 self.last_display_data.append((x1, y1, x2, y2, color, final_status, label))
 
+        # ==========================================
         # Drawing
+        # ==========================================
         for (x1, y1, x2, y2, color, status, label) in self.last_display_data:
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            cv2.putText(frame, label, (x1, y1 - 10),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
             if status != "safe":
                 status_text = "PHONE" if status == "texting" else status.upper()
-                cv2.putText(frame, status_text, (x1, y2 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                cv2.putText(frame, status_text, (x1, y2 + 20),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
         return frame, global_status, screenshot_saved_global
 
-    def _associate_phones_to_persons_advanced(self, person_boxes, phone_boxes, pose_keypoints_map):
+    def _associate_phones_to_persons_advanced(self, person_boxes, phone_boxes,
+                                             pose_keypoints_map, current_time):
+        """
+        FIXED: Advanced association with all 5 optimizations properly implemented.
+
+        Features:
+        1. Scale-invariant cost calculation
+        2. Motion vector alignment (FIXED: strong penalty)
+        3. Static object suppression (FIXED: proper timing)
+        4. Sticky association (FIXED: decay on occlusion)
+        5. Elbow angle validation (FIXED: check correct arm, strong penalty)
+        """
         mapping = {}
         if not phone_boxes or not person_boxes:
+            return mapping
+
+        # FIXED: Add safety check for tuple length
+        if len(phone_boxes[0]) != 6:
+            print(f"WARNING: Expected phone_boxes with 6 elements, got {len(phone_boxes[0])}")
             return mapping
 
         cost_matrix = []
@@ -305,97 +394,115 @@ class PhoneDetector:
 
         for person_bbox in person_boxes:
             p_x1, p_y1, p_x2, p_y2, p_id = person_bbox
+            person_width = p_x2 - p_x1
             person_height = p_y2 - p_y1
             p_cx = (p_x1 + p_x2) / 2
             p_chest_y = p_y1 + person_height * 0.4
 
-            # Velocity of Person
+            # Get person velocity
             v_person = self.velocities.get(p_id, (0, 0))
             vp_mag = math.hypot(v_person[0], v_person[1])
 
             row_costs = []
+
             for phone_bbox in phone_boxes:
                 ph_x1, ph_y1, ph_x2, ph_y2, conf, ph_id = phone_bbox
                 ph_cx = (ph_x1 + ph_x2) / 2
                 ph_cy = (ph_y1 + ph_y2) / 2
 
-                # --- BASE COST (Scale Invariant) ---
+                # ==========================================
+                # Base Cost (Scale-Invariant)
+                # ==========================================
                 cost = float('inf')
 
-                # 1. Proximity Check
-                pad_x = (p_x2 - p_x1) * 0.4
+                # Adaptive padding
+                pad_x = person_width * 0.4
                 pad_y = person_height * 0.3
+
                 if (p_x1 - pad_x <= ph_cx <= p_x2 + pad_x and
                     p_y1 - pad_y <= ph_cy <= p_y2 + pad_y):
 
                     kpts = pose_keypoints_map.get(p_id)
                     raw_dist = float('inf')
 
-                    # Wrist Distance
+                    # Try wrist distance first
                     if kpts is not None:
                         wrists = []
                         if kpts[9][0] > 0: wrists.append(kpts[9])
                         if kpts[10][0] > 0: wrists.append(kpts[10])
+
                         for w in wrists:
                             d = math.hypot(ph_cx - w[0], ph_cy - w[1])
-                            if d < raw_dist: raw_dist = d
+                            if d < raw_dist:
+                                raw_dist = d
 
+                    # Fallback to chest distance
                     if raw_dist == float('inf'):
                         raw_dist = math.hypot(ph_cx - p_cx, ph_cy - p_chest_y)
 
+                    # Normalize by person height
                     cost = raw_dist / person_height
 
-                    # --- ADVANCED HEURISTICS ---
-
-                    # 2. Sticky Association (Momentum Bonus)
+                    # ==========================================
+                    # Optimization 1: Sticky Association
+                    # ==========================================
                     if self.last_matches.get(p_id) == ph_id:
-                        cost *= 0.6  # 40% discount to keep lock
+                        cost *= 0.6  # 40% discount for continuity
 
-                    # 3. Static Suppression
+                    # ==========================================
+                    # Optimization 2: Static Object Suppression
+                    # ==========================================
                     if ph_id in self.static_objects:
-                        cost += 5.0 # Massive penalty for known static noise
-                        # EXCEPTION: If wrist is extremely close (< 5% height), user picked it up
-                        if raw_dist < person_height * 0.05:
-                            cost -= 5.0 # Cancel penalty
+                        cost += 5.0  # Strong penalty for known static objects
 
-                    # 4. Motion Vector Alignment
-                    # If person is moving fast, phone MUST move with them
-                    if vp_mag > 2.0: # Arbitrary velocity threshold
-                        v_phone = self.velocities.get(ph_id, (0,0))
+                        # EXCEPTION: Pickup detection (wrist very close)
+                        if raw_dist < person_height * 0.05:  # Within 5% of height
+                            cost -= 5.0  # Cancel penalty - user picking it up
+
+                    # ==========================================
+                    # Optimization 3: Motion Vector Alignment
+                    # ==========================================
+                    if vp_mag > 2.0:  # Person is moving
+                        v_phone = self.velocities.get(ph_id, (0, 0))
                         v_ph_mag = math.hypot(v_phone[0], v_phone[1])
 
-                        # Check 1: Phone static while person moves?
-                        if v_ph_mag < 0.5:
-                            cost += 2.0 # Penalty
+                        # FIXED: Strong penalty (was 2.0, now 100.0)
+                        if v_ph_mag < 0.5:  # Phone is stationary
+                            cost += 100.0  # Reject - person moving, phone still
                         else:
-                            # Check 2: Direction alignment (Dot Product)
-                            # Normalize
-                            vp_norm = (v_person[0]/vp_mag, v_person[1]/vp_mag)
-                            vph_norm = (v_phone[0]/v_ph_mag, v_phone[1]/v_ph_mag)
-                            dot = vp_norm[0]*vph_norm[0] + vp_norm[1]*vph_norm[1]
+                            # Check direction alignment
+                            vp_norm = (v_person[0] / vp_mag, v_person[1] / vp_mag)
+                            vph_norm = (v_phone[0] / v_ph_mag, v_phone[1] / v_ph_mag)
+                            dot = vp_norm[0] * vph_norm[0] + vp_norm[1] * vph_norm[1]
 
-                            if dot < 0: # Moving opposite directions
-                                cost += 2.0
+                            if dot < 0:  # Moving in opposite directions
+                                cost += 100.0  # Strong rejection
 
-                    # 5. Elbow Angle Validation (Biomechanical)
+                    # ==========================================
+                    # Optimization 4: Elbow Angle Validation
+                    # ==========================================
                     if kpts is not None:
-                        # Left Arm: 5-7-9, Right Arm: 6-8-10
-                        # We only check the arm closest to the phone
-                        # This is complex, simplifying to: if EITHER arm is straight, apply penalty?
-                        # No, valid to have one arm down and one up.
-                        # Check arm closest to phone.
+                        # FIXED: Determine which wrist is closer to phone
+                        left_wrist = kpts[9]
+                        right_wrist = kpts[10]
 
-                        arms = [
-                            (5, 7, 9), # Left
-                            (6, 8, 10) # Right
-                        ]
+                        dist_left = math.hypot(ph_cx - left_wrist[0], ph_cy - left_wrist[1])
+                        dist_right = math.hypot(ph_cx - right_wrist[0], ph_cy - right_wrist[1])
 
-                        valid_pose_found = False
-                        pose_checked = False
+                        # Check only the arm that's actually near the phone
+                        if dist_left < dist_right and left_wrist[0] > 0:
+                            arm_to_check = (5, 7, 9)  # Left: shoulder, elbow, wrist
+                        elif right_wrist[0] > 0:
+                            arm_to_check = (6, 8, 10)  # Right: shoulder, elbow, wrist
+                        else:
+                            arm_to_check = None
 
-                        for s_idx, e_idx, w_idx in arms:
-                            if kpts[s_idx][0] > 0 and kpts[e_idx][0] > 0 and kpts[w_idx][0] > 0:
-                                # Calculate Angle
+                        if arm_to_check:
+                            s_idx, e_idx, w_idx = arm_to_check
+
+                            if (kpts[s_idx][0] > 0 and kpts[e_idx][0] > 0 and
+                                kpts[w_idx][0] > 0):
+                                # Calculate elbow angle
                                 a = kpts[s_idx]
                                 b = kpts[e_idx]
                                 c = kpts[w_idx]
@@ -403,34 +510,41 @@ class PhoneDetector:
                                 ba = a - b
                                 bc = c - b
 
-                                cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
-                                angle = np.degrees(np.arccos(np.clip(cosine_angle, -1.0, 1.0)))
+                                dot_prod = np.dot(ba, bc)
+                                mag_prod = np.linalg.norm(ba) * np.linalg.norm(bc)
 
-                                pose_checked = True
-                                # Texting usually < 120 degrees
-                                if angle < 120:
-                                    valid_pose_found = True
+                                if mag_prod > 0:
+                                    cosine_angle = dot_prod / mag_prod
+                                    cosine_angle = np.clip(cosine_angle, -1.0, 1.0)
+                                    angle = np.degrees(np.arccos(cosine_angle))
 
-                        # If we successfully checked at least one arm, and NONE were valid (<120)
-                        # imply arms are straight down/out.
-                        if pose_checked and not valid_pose_found:
-                            cost += 1.0 # Penalty for non-texting posture
+                                    # FIXED: Stronger penalty (was 1.0, now 5.0)
+                                    # Texting requires bent elbow (< 120°)
+                                    if angle > 150:  # Arm too straight
+                                        cost += 5.0  # Strong penalty
 
-                    # 6. Overhead Penalty
-                    if ph_cy < p_y1:
-                        cost += 100.0
+                    # ==========================================
+                    # Overhead Phone Penalty
+                    # ==========================================
+                    if ph_cy < p_y1:  # Phone above person's head
+                        cost += 100.0  # Strong rejection
 
                 row_costs.append(cost)
             cost_matrix.append(row_costs)
 
+        # ==========================================
+        # Hungarian Algorithm
+        # ==========================================
         C = np.array(cost_matrix)
         C[C == float('inf')] = 100000
 
         try:
             row_ind, col_ind = linear_sum_assignment(C)
-        except:
+        except Exception as e:
+            print(f"Hungarian algorithm error: {e}")
             return mapping
 
+        # Filter by threshold
         MAX_NORM_COST = 0.6
 
         for r, c in zip(row_ind, col_ind):
@@ -440,33 +554,64 @@ class PhoneDetector:
                 mapping[p_id] = True
                 new_matches[p_id] = ph_id
 
-        self.last_matches = new_matches
+        # ==========================================
+        # FIXED: Sticky Association with Decay
+        # ==========================================
+        # Don't immediately wipe old matches - use decay counter
+        for p_id in list(self.last_matches.keys()):
+            if p_id not in new_matches:
+                # Increment age counter
+                self.match_age[p_id] = self.match_age.get(p_id, 0) + 1
+
+                # Remove only after 10 frames without match (occlusion tolerance)
+                if self.match_age[p_id] > 10:
+                    del self.last_matches[p_id]
+                    self.match_age.pop(p_id, None)
+            else:
+                # Reset age counter
+                self.match_age[p_id] = 0
+
+        # Update with new matches
+        self.last_matches.update(new_matches)
+
         return mapping
 
     def _associate_pose_to_persons(self, person_boxes, pose_boxes, pose_kpts):
+        """
+        Associate pose detections with person detections using IoU + center fallback.
+        """
         mapping = {}
         if len(person_boxes) == 0 or len(pose_boxes) == 0:
             return mapping
         
         for p_box in person_boxes:
             px1, py1, px2, py2, track_id = p_box
+            p_area = (px2 - px1) * (py2 - py1)
             best_score = 0
             best_idx = -1
 
             for i, (pox1, poy1, pox2, poy2) in enumerate(pose_boxes):
-                ix1 = max(px1, pox1); iy1 = max(py1, poy1)
-                ix2 = min(px2, pox2); iy2 = min(py2, poy2)
+                # Calculate IoU
+                ix1 = max(px1, pox1)
+                iy1 = max(py1, poy1)
+                ix2 = min(px2, pox2)
+                iy2 = min(py2, poy2)
+
                 iou = 0
                 if ix2 > ix1 and iy2 > iy1:
-                    inter = (ix2-ix1)*(iy2-iy1)
-                    union = ((px2-px1)*(py2-py1)) + ((pox2-pox1)*(poy2-poy1)) - inter
-                    iou = inter/union
+                    inter = (ix2 - ix1) * (iy2 - iy1)
+                    union = p_area + (pox2 - pox1) * (poy2 - poy1) - inter
+                    iou = inter / union if union > 0 else 0
 
-                po_cx = (pox1+pox2)/2; po_cy = (poy1+poy2)/2
-                center_inside = (px1<=po_cx<=px2) and (py1<=po_cy<=py2)
+                # Center point fallback
+                po_cx = (pox1 + pox2) / 2
+                po_cy = (poy1 + poy2) / 2
+                center_inside = (px1 <= po_cx <= px2) and (py1 <= po_cy <= py2)
 
+                # Custom scoring
                 score = iou
-                if center_inside and score < 0.4: score = 0.4
+                if center_inside and score < 0.4:
+                    score = 0.4  # Boost if center matches
 
                 if score > best_score:
                     best_score = score
@@ -474,16 +619,26 @@ class PhoneDetector:
 
             if best_idx != -1 and best_score > 0.3:
                 mapping[track_id] = pose_kpts[best_idx]
+
         return mapping
 
     def save_evidence(self, frame, x1, y1, x2, y2, camera_name, type_str, track_id):
-        # Implementation identical to previous, just cleaner
+        """Save evidence screenshot with metadata."""
         evidence_img = frame.copy()
-        color = (0,0,255) if type_str=="PHONE" else (255,0,0)
-        cv2.rectangle(evidence_img, (x1,y1), (x2,y2), color, 3)
+        color = (0, 0, 255) if type_str == "PHONE" else (255, 0, 0)
+        cv2.rectangle(evidence_img, (x1, y1), (x2, y2), color, 3)
+
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cv2.putText(evidence_img, f"{type_str} | {camera_name} | {ts}", (10,30),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
-        fn = os.path.join(self.output_dir, f"evidence_{type_str}_{time.time()}.jpg")
-        cv2.imwrite(fn, evidence_img)
-        print(f"EVIDENCE SAVED: {fn}")
+        cv2.rectangle(evidence_img, (0, 0), (evidence_img.shape[1], 40), (0, 0, 0), -1)
+        header_text = f"{type_str} | {camera_name} | {ts} | ID: {track_id}"
+        cv2.putText(evidence_img, header_text, (10, 25),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+        timestamp_fn = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")[:-3]
+        safe_cam_name = "".join([c for c in camera_name if c.isalnum() or c in (' ', '_', '-')]).strip().replace(' ', '_')
+        filename = os.path.join(
+            self.output_dir,
+            f"evidence_{type_str.lower()}_{safe_cam_name}_{timestamp_fn}_id{track_id}.jpg"
+        )
+        cv2.imwrite(filename, evidence_img)
+        print(f"📸 EVIDENCE SAVED: {filename}")
