@@ -155,7 +155,7 @@ if page_selection == "🔴 Live Dashboard":
                 loop_texting = []
                 loop_sleeping = []
                 
-                for cam_id, container in cam_containers.items():
+                for cam_id, container in list(cam_containers.items()):
                     thread = container["thread"]
                     frame = thread.get_frame()
                     status = thread.get_status()
