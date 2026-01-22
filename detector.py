@@ -8,7 +8,7 @@ import threading
 from sleep_detector import SleepDetector
 
 class PhoneDetector:
-    def __init__(self, model_path='yolo26n.pt', output_dir="detections", cooldown_seconds=5, consistency_threshold=3, model_instance=None, pose_model_instance=None, lock=None):
+    def __init__(self, model_path='yolo26n.pt', output_dir="detections", cooldown_seconds=120, consistency_threshold=3, model_instance=None, pose_model_instance=None, lock=None):
         
         self.output_dir = output_dir
         if not os.path.exists(self.output_dir):
@@ -27,257 +27,282 @@ class PhoneDetector:
         self.PHONE_CLASS_ID = 67
         self.PERSON_CLASS_ID = 0
         self.COOLDOWN_SECONDS = cooldown_seconds
-        
-        # Temporal consistency: list of {'center': (x,y), 'streak': int, 'last_seen': time}
-        self.detection_streaks = []
         self.CONSISTENCY_THRESHOLD = consistency_threshold
         
-        # Sleep Detection Tracking (Similar to phone detection)
-        self.sleep_streaks = []  # Track sleep consistency per person
-        self.SLEEP_CONSISTENCY_THRESHOLD = 3  # Need 3 consecutive detections
-        
-        # Spatial cooldown tracking: list of (x, y, timestamp, type)
-        # type can be 'phone' or 'sleep'
-        self.screenshot_locations = []
-        
-        # State for frame skipping
-        self.last_display_data = [] # List of (x1, y1, x2, y2, color, status)
+        self.cooldowns = {}
+        self.streaks = {}
+        self.last_display_data = []
 
     def process_frame(self, frame, frame_count, skip_frames=5, save_screenshots=True, conf_threshold=0.25, camera_name="Unknown"):
         """
-        Process the frame.
-        skip_frames: Run heavy inference only every N frames.
-        Returns: frame, global_status_string, screenshot_saved_bool
+        Optimized Process Frame:
+        - Vectorized inference for Persons AND Phones (Single Pass)
+        - Vectorized inference for Pose (Single Pass)
+        - Geometric association
         """
         current_time = time.time()
         
-        # Cleanup old cooldowns (older than cooldown_seconds)
-        # Format: (x, y, timestamp, type)
-        self.screenshot_locations = [
-            s for s in self.screenshot_locations 
-            if (current_time - s[2]) < self.COOLDOWN_SECONDS
-        ]
+        # Cleanup
+        if frame_count % 1000 == 0:
+            self.cooldowns = {k: v for k, v in self.cooldowns.items() if (current_time - v) < self.COOLDOWN_SECONDS * 2}
+            self.streaks = {}
 
-        global_status = "safe" # safe, texting, sleeping
+        global_status = "safe"
         screenshot_saved_global = False
 
         # --- HEAVY INFERENCE STEP ---
         if frame_count % skip_frames == 0:
-            self.last_display_data = [] # Reset display data
+            self.last_display_data = []
             
-            # Temporary list to track who we saw this frame (for streak management)
-            current_frame_detections = [] 
+            # 1. Vectorized Tracking (Person + Phone)
+            classes_to_track = [self.PERSON_CLASS_ID, self.PHONE_CLASS_ID]
             
-            # 1. First Pass: Find People in the full room
-            # We filter for PERSON class (0) only
-            
-            # Thread-safe inference
             if self.lock:
                 with self.lock:
-                    results = self.model.predict(frame, classes=[self.PERSON_CLASS_ID], conf=conf_threshold, verbose=False)
+                    results = self.model.track(frame, classes=classes_to_track, conf=conf_threshold, persist=True, verbose=False, imgsz=1280)
             else:
-                results = self.model.predict(frame, classes=[self.PERSON_CLASS_ID], conf=conf_threshold, verbose=False)
+                results = self.model.track(frame, classes=classes_to_track, conf=conf_threshold, persist=True, verbose=False, imgsz=1280)
             
-            # Use cpu().numpy() or .tolist() to get coordinates
-            if len(results) > 0:
-                boxes = results[0].boxes
-                
-                for idx, box in enumerate(boxes):
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    p_cx, p_cy = (x1 + x2) / 2, (y1 + y2) / 2
+            person_boxes = [] # (x1, y1, x2, y2, id)
+            phone_boxes = []  # (x1, y1, x2, y2, conf)
+
+            if len(results) > 0 and results[0].boxes:
+                for box in results[0].boxes:
+                    cls_id = int(box.cls[0].item())
+                    coords = box.xyxy[0].cpu().numpy()
+
+                    if cls_id == self.PERSON_CLASS_ID:
+                        if box.id is not None:
+                            track_id = int(box.id.item())
+                            person_boxes.append((*coords, track_id))
+                    elif cls_id == self.PHONE_CLASS_ID:
+                        conf = float(box.conf[0].item())
+                        phone_boxes.append((*coords, conf))
+
+            # 2. Vectorized Pose Estimation (Full Frame)
+            pose_keypoints_map = {}
+            if hasattr(self.sleep_detector, 'pose_model'):
+                try:
+                    pose_results = self.sleep_detector.pose_model(frame, verbose=False, conf=0.5)
                     
-                    # Default status
-                    status = "safe"
-                    color = (0, 255, 0) # Green
-                    
-                    # --- ZOOM LOGIC ---
+                    if len(pose_results) > 0 and pose_results[0].boxes:
+                        pose_boxes = pose_results[0].boxes.xyxy.cpu().numpy()
+                        pose_kpts = pose_results[0].keypoints.xy.cpu().numpy()
+
+                        # Match Pose to Persons
+                        pose_keypoints_map = self._associate_pose_to_persons(person_boxes, pose_boxes, pose_kpts)
+                except Exception as e:
+                    print(f"Pose Inference Error: {e}")
+
+            # 3. Map Phones to Persons (Using Keypoints if available)
+            phone_map = self._associate_phones_to_persons(person_boxes, phone_boxes, pose_keypoints_map)
+
+            # 4. Process Each Person
+            for p_box in person_boxes:
+                x1, y1, x2, y2, track_id = map(int, p_box)
+
+                status = "safe"
+                color = (0, 255, 0)
+                label = f"ID: {track_id}"
+
+                # Check Phone Map
+                has_phone = phone_map.get(track_id, False)
+
+                if has_phone:
+                    status = "texting"
+                    color = (0, 0, 255)
+                    global_status = "texting"
+                else:
+                    # Sleep Detection
                     h, w, _ = frame.shape
                     pad = 20
                     cx1 = max(0, x1 - pad)
                     cy1 = max(0, y1 - pad)
                     cx2 = min(w, x2 + pad)
                     cy2 = min(h, y2 + pad)
-                    
                     person_crop = frame[cy1:cy2, cx1:cx2]
                     
-                    is_candidate = False
-                    
                     if person_crop.size > 0:
-                        # 2. Second Pass: Run AI on JUST this person
-                        # Look for PHONE class (67) with lower threshold
+                        sleep_key = f"{camera_name}_id_{track_id}"
+                        kpts = pose_keypoints_map.get(track_id)
                         
-                        # Thread-safe inference
-                        if self.lock:
-                            with self.lock:
-                                crop_results = self.model.predict(person_crop, classes=[self.PHONE_CLASS_ID], conf=0.15, verbose=False)
-                        else:
-                            crop_results = self.model.predict(person_crop, classes=[self.PHONE_CLASS_ID], conf=0.15, verbose=False)
+                        sleep_status, _ = self.sleep_detector.process_crop(
+                            person_crop,
+                            id_key=sleep_key,
+                            keypoints=kpts,
+                            crop_origin=(cx1, cy1)
+                        )
                         
-                        if len(crop_results) > 0 and len(crop_results[0].boxes) > 0:
-                            is_candidate = True
-                    
-                    if is_candidate:
-                        # --- TEMPORAL CONSISTENCY ---
-                        # Try to match with existing streak
-                        matched = False
-                        for candidate in self.detection_streaks:
-                            lx, ly = candidate['center']
-                            dist = math.sqrt((p_cx - lx)**2 + (p_cy - ly)**2)
-                            
-                            # Match if within 100 pixels
-                            if dist < 100: 
-                                candidate['streak'] += 1
-                                candidate['center'] = (p_cx, p_cy)
-                                candidate['last_seen'] = current_time
-                                matched = True
-                                
-                                # Check Threshold
-                                if candidate['streak'] >= self.CONSISTENCY_THRESHOLD:
-                                    status = "texting"
-                                    color = (0, 0, 255) # Red
-                                    global_status = "texting"
-                                    
-                                    # Attempt Save
-                                    if save_screenshots:
-                                        # Check spatial cooldown
-                                        should_save = True
-                                        for (sx, sy, stime, stype) in self.screenshot_locations:
-                                            if stype == 'phone' and math.sqrt((p_cx - sx)**2 + (p_cy - sy)**2) < 100:
-                                                should_save = False
-                                                break
-                                        
-                                        if should_save:
-                                            self.screenshot_locations.append((p_cx, p_cy, current_time, 'phone'))
-                                            self.save_evidence(frame, x1, y1, x2, y2, camera_name, "PHONE")
-                                            screenshot_saved_global = True
-                                break
-                        
-                        if not matched:
-                            # New Candidate
-                            self.detection_streaks.append({
-                                'center': (p_cx, p_cy),
-                                'streak': 1,
-                                'last_seen': current_time
-                            })
-                            # Keep status green until threshold reached
-                            
-                        # Mark this person as processed (so we don't prune their streak)
-                        current_frame_detections.append((p_cx, p_cy))
-
-                    # --- SLEEP DETECTION (If not texting) ---
-                    if status != "texting" and person_crop.size > 0:
-                        # We use a simple ID key based on camera + index to persist state roughly
-                        # Ideally we would use tracking ID, but we don't have it yet.
-                        # Assumption: People don't swap seats often.
-                        sleep_key = f"{camera_name}_idx_{idx}"
-                        sleep_status, sleep_info = self.sleep_detector.process_crop(person_crop, id_key=sleep_key)
-                        
-
                         if sleep_status == "sleeping":
-                            # ADD TEMPORAL CONSISTENCY FOR SLEEP
-                            # Similar logic to phone detection
-                            matched_sleep = False
-                            for sleep_candidate in self.sleep_streaks:
-                                sx, sy = sleep_candidate['center']
-                                dist = math.sqrt((p_cx - sx)**2 + (p_cy - sy)**2)
-                                
-                                if dist < 100:
-                                    sleep_candidate['streak'] += 1
-                                    sleep_candidate['center'] = (p_cx, p_cy)
-                                    sleep_candidate['last_seen'] = current_time
-                                    matched_sleep = True
-                                    
-                                    # Check if we should mark as sleeping and save
-                                    if sleep_candidate['streak'] >= self.SLEEP_CONSISTENCY_THRESHOLD:
-                                        status = "sleeping"
-                                        color = (255, 0, 0) # Blue (BGR)
-                                        if global_status != "texting":
-                                            global_status = "sleeping"
-                                        
-                                        # SAVE SLEEP SCREENSHOT
-                                        if save_screenshots:
-                                            should_save = True
-                                            for (sx2, sy2, stime, stype) in self.screenshot_locations:
-                                                if stype == 'sleep' and math.sqrt((p_cx - sx2)**2 + (p_cy - sy2)**2) < 100:
-                                                    should_save = False
-                                                    break
-                                            
-                                            if should_save:
-                                                self.screenshot_locations.append((p_cx, p_cy, current_time, 'sleep'))
-                                                self.save_evidence(frame, x1, y1, x2, y2, camera_name, "SLEEP")
-                                                screenshot_saved_global = True
-                                    break
-                            
-                            if not matched_sleep:
-                                # New sleep candidate
-                                self.sleep_streaks.append({
-                                    'center': (p_cx, p_cy),
-                                    'streak': 1,
-                                    'last_seen': current_time
-                                })
-                            
+                            status = "sleeping"
+                            color = (255, 0, 0)
+                            if global_status != "texting":
+                                global_status = "sleeping"
                         elif sleep_status == "drowsy":
-                            # Warning color
-                            color = (0, 255, 255) # Yellow
-                            
-                    # Store for display
-                    self.last_display_data.append((x1, y1, x2, y2, color, status))
+                            color = (0, 255, 255)
 
-            # --- PRUNING STREAKS ---
-            # Remove streaks that were not matched in this frame (person stopped using phone or left)
-            self.detection_streaks = [
-                d for d in self.detection_streaks 
-                if (current_time - d['last_seen']) < 1.0 # 1 second tolerance
-            ]
-            
-            # PRUNE SLEEP STREAKS
-            self.sleep_streaks = [
-                d for d in self.sleep_streaks
-                if (current_time - d['last_seen']) < 1.0
-            ]
+                # --- VERIFICATION & SAVING ---
+                violation_type = None
+                if status == "texting": violation_type = "texting"
+                elif status == "sleeping": violation_type = "sleeping"
 
-        # --- DRAWING (Every Frame using cached data) ---
-        for (x1, y1, x2, y2, color, status) in self.last_display_data:
+                current_streak_val = 0
+
+                if violation_type:
+                    key = (track_id, violation_type)
+                    self.streaks[key] = self.streaks.get(key, 0) + 1
+                    current_streak_val = self.streaks[key]
+
+                possible_types = ["texting", "sleeping"]
+                for v_type in possible_types:
+                    if v_type != violation_type:
+                        self.streaks[(track_id, v_type)] = 0
+
+                if save_screenshots and violation_type:
+                    if current_streak_val >= self.CONSISTENCY_THRESHOLD:
+                        key = (track_id, violation_type)
+                        last_time = self.cooldowns.get(key, 0)
+
+                        if (current_time - last_time) > self.COOLDOWN_SECONDS:
+                            type_str = "PHONE" if violation_type == "texting" else "SLEEP"
+                            self.save_evidence(frame, x1, y1, x2, y2, camera_name, type_str, track_id=track_id)
+                            screenshot_saved_global = True
+                            self.cooldowns[key] = current_time
+                            label += " [SAVED]"
+                    else:
+                        label += f" [{current_streak_val}/{self.CONSISTENCY_THRESHOLD}]"
+
+                self.last_display_data.append((x1, y1, x2, y2, color, status, label))
+
+        # --- DRAWING ---
+        for (x1, y1, x2, y2, color, status, label) in self.last_display_data:
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            if status == "texting":
-                cv2.putText(frame, "PHONE DETECTED", (x1, y1 - 10), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                global_status = "texting" # Ensure drawing updates global status if cached
-            elif status == "sleeping":
-                cv2.putText(frame, "SLEEPING", (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                if global_status != "texting":
-                     global_status = "sleeping"
+            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            if status != "safe":
+                status_text = "PHONE" if status == "texting" else status.upper()
+                cv2.putText(frame, status_text, (x1, y2 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+            if status == "texting": global_status = "texting"
+            elif status == "sleeping" and global_status != "texting": global_status = "sleeping"
 
         return frame, global_status, screenshot_saved_global
 
-    def save_evidence(self, frame, x1, y1, x2, y2, camera_name="Unknown", detection_type="PHONE"):
+    def _associate_phones_to_persons(self, person_boxes, phone_boxes, pose_keypoints_map):
         """
-        Save evidence screenshot.
+        Maps phones to persons using Keypoints (High Accuracy) or Bounding Box (Fallback).
+        """
+        mapping = {}
+        if not phone_boxes: return mapping
+
+        for ph in phone_boxes:
+            ph_x1, ph_y1, ph_x2, ph_y2, _ = ph
+            ph_cx = (ph_x1 + ph_x2) / 2
+            ph_cy = (ph_y1 + ph_y2) / 2
+
+            best_person_id = None
+            min_dist = float('inf')
+
+            for p in person_boxes:
+                p_x1, p_y1, p_x2, p_y2, p_id = p
+
+                # Check Containment First (Optimization)
+                # Only check people near the phone
+                pad = 100 # Allow phone to be slightly outside box (arms extended)
+                if not (p_x1 - pad <= ph_cx <= p_x2 + pad and p_y1 - pad <= ph_cy <= p_y2 + pad):
+                    continue
+
+                # --- STRATEGY 1: WRIST DISTANCE (Accurate) ---
+                kpts = pose_keypoints_map.get(p_id)
+                dist = float('inf')
+
+                if kpts is not None:
+                    # Wrist Indices: 9 (Left), 10 (Right)
+                    # Keypoint format: [x, y]
+                    wrists = []
+                    if kpts[9][0] > 0: wrists.append(kpts[9])
+                    if kpts[10][0] > 0: wrists.append(kpts[10])
+
+                    if wrists:
+                        # Find distance to closest wrist
+                        for w_pt in wrists:
+                            d = math.hypot(ph_cx - w_pt[0], ph_cy - w_pt[1])
+                            if d < dist: dist = d
+
+                        # Verify phone is "below" eyes (looking down at it check)
+                        # Indices 1, 2 are eyes.
+                        # Simple check: Phone y > Eye y
+                        eye_y = 0
+                        if kpts[1][1] > 0: eye_y = kpts[1][1]
+                        elif kpts[2][1] > 0: eye_y = kpts[2][1]
+
+                        if eye_y > 0 and ph_cy < eye_y - 50:
+                            # Phone is significantly above eyes -> Taking a selfie?
+                            # Or false positive on wall. Penalty.
+                            dist += 200
+
+                # --- STRATEGY 2: CHEST DISTANCE (Fallback) ---
+                if dist == float('inf'):
+                    p_cx = (p_x1 + p_x2) / 2
+                    # Estimate hand/interaction area (center of body, slightly down)
+                    p_chest_y = p_y1 + (p_y2 - p_y1) * 0.4
+                    dist = math.hypot(ph_cx - p_cx, ph_cy - p_chest_y)
+
+                if dist < min_dist:
+                    min_dist = dist
+                    best_person_id = p_id
+
+            # Threshold: Phone must be reasonably close (e.g., 200px)
+            if best_person_id is not None and min_dist < 200:
+                mapping[best_person_id] = True
+
+        return mapping
+
+    def _associate_pose_to_persons(self, person_boxes, pose_boxes, pose_kpts):
+        mapping = {}
+        if len(person_boxes) == 0 or len(pose_boxes) == 0:
+            return mapping
         
-        Args:
-            detection_type: "PHONE" or "SLEEP"
-        """
+        for p_box in person_boxes:
+            px1, py1, px2, py2, track_id = p_box
+            p_area = (px2 - px1) * (py2 - py1)
+            best_iou = 0
+            best_idx = -1
+
+            for i, (pox1, poy1, pox2, poy2) in enumerate(pose_boxes):
+                ix1 = max(px1, pox1)
+                iy1 = max(py1, poy1)
+                ix2 = min(px2, pox2)
+                iy2 = min(py2, poy2)
+
+                if ix2 > ix1 and iy2 > iy1:
+                    inter_area = (ix2 - ix1) * (iy2 - iy1)
+                    po_area = (pox2 - pox1) * (poy2 - poy1)
+                    union_area = p_area + po_area - inter_area
+                    iou = inter_area / union_area if union_area > 0 else 0
+
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_idx = i
+
+            if best_idx != -1 and best_iou > 0.3:
+                mapping[track_id] = pose_kpts[best_idx]
+        return mapping
+
+    def save_evidence(self, frame, x1, y1, x2, y2, camera_name="Unknown", detection_type="PHONE", track_id=None):
         evidence_img = frame.copy()
-        
-        # Draw the box on the evidence
-        box_color = (0, 0, 255) if detection_type == "PHONE" else (255, 0, 0)  # Red for phone, Blue for sleep
+        box_color = (0, 0, 255) if detection_type == "PHONE" else (255, 0, 0)
         cv2.rectangle(evidence_img, (x1, y1), (x2, y2), box_color, 3)
         
-        # Add Header
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        # Draw black bar at top
         cv2.rectangle(evidence_img, (0, 0), (evidence_img.shape[1], 40), (0,0,0), -1)
-        # Add text
         header_text = f"{detection_type} | {camera_name} | {ts}"
-        cv2.putText(evidence_img, header_text, (10, 25), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        if track_id is not None: header_text += f" | ID: {track_id}"
 
-        timestamp_fn = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        # Sanitize camera name for filename
+        cv2.putText(evidence_img, header_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+        timestamp_fn = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")[:-3]
         safe_cam_name = "".join([c for c in camera_name if c.isalnum() or c in (' ', '_', '-')]).strip().replace(' ', '_')
-        
-        # Add detection type to filename
-        filename = os.path.join(self.output_dir, f"evidence_{detection_type.lower()}_{safe_cam_name}_{timestamp_fn}.jpg")
+        id_str = f"_id{track_id}" if track_id is not None else ""
+        filename = os.path.join(self.output_dir, f"evidence_{detection_type.lower()}_{safe_cam_name}_{timestamp_fn}{id_str}.jpg")
         cv2.imwrite(filename, evidence_img)
         print(f"📸 EVIDENCE SAVED: {filename}")
