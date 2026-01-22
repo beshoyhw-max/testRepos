@@ -5,6 +5,8 @@ import math
 import datetime
 from ultralytics import YOLO
 import threading
+import numpy as np
+from scipy.optimize import linear_sum_assignment
 from sleep_detector import SleepDetector
 
 class PhoneDetector:
@@ -190,70 +192,81 @@ class PhoneDetector:
     def _associate_phones_to_persons(self, person_boxes, phone_boxes, pose_keypoints_map):
         """
         Maps phones to persons using Keypoints (High Accuracy) or Bounding Box (Fallback).
+        Uses Hungarian Algorithm for global optimization.
         """
         mapping = {}
-        if not phone_boxes: return mapping
+        if not phone_boxes or not person_boxes: return mapping
 
-        for ph in phone_boxes:
-            ph_x1, ph_y1, ph_x2, ph_y2, _ = ph
-            ph_cx = (ph_x1 + ph_x2) / 2
-            ph_cy = (ph_y1 + ph_y2) / 2
+        # Create Cost Matrix: Rows=Persons, Cols=Phones
+        cost_matrix = []
 
-            best_person_id = None
-            min_dist = float('inf')
+        for p in person_boxes:
+            p_x1, p_y1, p_x2, p_y2, p_id = p
+            p_cx = (p_x1 + p_x2) / 2
+            # p_chest_y is used as fallback center
+            p_chest_y = p_y1 + (p_y2 - p_y1) * 0.4
 
-            for p in person_boxes:
-                p_x1, p_y1, p_x2, p_y2, p_id = p
+            row_costs = []
+            for ph in phone_boxes:
+                ph_x1, ph_y1, ph_x2, ph_y2, _ = ph
+                ph_cx = (ph_x1 + ph_x2) / 2
+                ph_cy = (ph_y1 + ph_y2) / 2
 
-                # Check Containment First (Optimization)
-                # Only check people near the phone
-                pad = 100 # Allow phone to be slightly outside box (arms extended)
-                if not (p_x1 - pad <= ph_cx <= p_x2 + pad and p_y1 - pad <= ph_cy <= p_y2 + pad):
-                    continue
+                # --- COST CALCULATION ---
+                cost = float('inf')
 
-                # --- STRATEGY 1: WRIST DISTANCE (Accurate) ---
-                kpts = pose_keypoints_map.get(p_id)
-                dist = float('inf')
+                # 1. Containment / Proximity Check
+                pad = 150 # Increased slightly for robustness
+                if (p_x1 - pad <= ph_cx <= p_x2 + pad and p_y1 - pad <= ph_cy <= p_y2 + pad):
 
-                if kpts is not None:
-                    # Wrist Indices: 9 (Left), 10 (Right)
-                    # Keypoint format: [x, y]
-                    wrists = []
-                    if kpts[9][0] > 0: wrists.append(kpts[9])
-                    if kpts[10][0] > 0: wrists.append(kpts[10])
+                    # Base Cost: Distance
+                    kpts = pose_keypoints_map.get(p_id)
+                    dist = float('inf')
 
-                    if wrists:
-                        # Find distance to closest wrist
-                        for w_pt in wrists:
-                            d = math.hypot(ph_cx - w_pt[0], ph_cy - w_pt[1])
-                            if d < dist: dist = d
+                    # Strategy A: Wrist Distance
+                    if kpts is not None:
+                        wrists = []
+                        if kpts[9][0] > 0: wrists.append(kpts[9])
+                        if kpts[10][0] > 0: wrists.append(kpts[10])
 
-                        # Verify phone is "below" eyes (looking down at it check)
-                        # Indices 1, 2 are eyes.
-                        # Simple check: Phone y > Eye y
-                        eye_y = 0
-                        if kpts[1][1] > 0: eye_y = kpts[1][1]
-                        elif kpts[2][1] > 0: eye_y = kpts[2][1]
+                        if wrists:
+                            for w_pt in wrists:
+                                d = math.hypot(ph_cx - w_pt[0], ph_cy - w_pt[1])
+                                if d < dist: dist = d
 
-                        if eye_y > 0 and ph_cy < eye_y - 50:
-                            # Phone is significantly above eyes -> Taking a selfie?
-                            # Or false positive on wall. Penalty.
-                            dist += 200
+                    # Strategy B: Chest Distance (Fallback)
+                    if dist == float('inf'):
+                        dist = math.hypot(ph_cx - p_cx, ph_cy - p_chest_y)
 
-                # --- STRATEGY 2: CHEST DISTANCE (Fallback) ---
-                if dist == float('inf'):
-                    p_cx = (p_x1 + p_x2) / 2
-                    # Estimate hand/interaction area (center of body, slightly down)
-                    p_chest_y = p_y1 + (p_y2 - p_y1) * 0.4
-                    dist = math.hypot(ph_cx - p_cx, ph_cy - p_chest_y)
+                    cost = dist
 
-                if dist < min_dist:
-                    min_dist = dist
-                    best_person_id = p_id
+                    # 2. Vertical Penalty (Phone above head)
+                    # Requirement: "Add a massive distance penalty if phone.y < head.y"
+                    # Using Bounding Box Top (p_y1) as Head Top approximation.
+                    if ph_cy < p_y1:
+                        cost += 10000 # Massive penalty
 
-            # Threshold: Phone must be reasonably close (e.g., 200px)
-            if best_person_id is not None and min_dist < 200:
-                mapping[best_person_id] = True
+                row_costs.append(cost)
+            cost_matrix.append(row_costs)
+
+        # Hungarian Algorithm
+        C = np.array(cost_matrix)
+
+        # Replace inf with a very large number for the solver
+        C[C == float('inf')] = 100000
+
+        row_ind, col_ind = linear_sum_assignment(C)
+
+        # Filter assignments
+        MAX_DIST = 300 # Pixels
+
+        for r, c in zip(row_ind, col_ind):
+            cost_val = cost_matrix[r][c]
+
+            if cost_val < MAX_DIST:
+                # person_boxes[r] -> get ID
+                p_id = person_boxes[r][4] # Index 4 is ID
+                mapping[p_id] = True
 
         return mapping
 
@@ -265,7 +278,7 @@ class PhoneDetector:
         for p_box in person_boxes:
             px1, py1, px2, py2, track_id = p_box
             p_area = (px2 - px1) * (py2 - py1)
-            best_iou = 0
+            best_score = 0
             best_idx = -1
 
             for i, (pox1, poy1, pox2, poy2) in enumerate(pose_boxes):
@@ -274,17 +287,30 @@ class PhoneDetector:
                 ix2 = min(px2, pox2)
                 iy2 = min(py2, poy2)
 
+                iou = 0
                 if ix2 > ix1 and iy2 > iy1:
                     inter_area = (ix2 - ix1) * (iy2 - iy1)
                     po_area = (pox2 - pox1) * (poy2 - poy1)
                     union_area = p_area + po_area - inter_area
                     iou = inter_area / union_area if union_area > 0 else 0
 
-                    if iou > best_iou:
-                        best_iou = iou
-                        best_idx = i
+                # Center Point Fallback
+                po_cx = (pox1 + pox2) / 2
+                po_cy = (poy1 + poy2) / 2
+                center_inside = (px1 <= po_cx <= px2) and (py1 <= po_cy <= py2)
 
-            if best_idx != -1 and best_iou > 0.3:
+                # Custom Scoring
+                score = iou
+                if center_inside:
+                    # If IoU is low but center is inside, boost score to be acceptable
+                    if score < 0.4:
+                        score = 0.4
+
+                if score > best_score:
+                    best_score = score
+                    best_idx = i
+
+            if best_idx != -1 and best_score > 0.3:
                 mapping[track_id] = pose_kpts[best_idx]
         return mapping
 
