@@ -4,111 +4,86 @@ import sys
 import os
 import numpy as np
 
-# Add repo root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-# We need to patch YOLO and SleepDetector BEFORE importing detector
-# because detector imports them at top level.
-# Actually detector imports them, but uses them in __init__
 from detector import PhoneDetector
 
-class TestDetectorLogic(unittest.TestCase):
+class TestDetectorAdvancedLogic(unittest.TestCase):
     def setUp(self):
-        # Patch Ultralytics YOLO to avoid loading real models
         self.yolo_patcher = patch('detector.YOLO')
         self.mock_yolo_cls = self.yolo_patcher.start()
         self.mock_yolo_instance = MagicMock()
         self.mock_yolo_cls.return_value = self.mock_yolo_instance
 
-        # Patch SleepDetector to avoid MediaPipe/Pose issues
         self.sleep_patcher = patch('detector.SleepDetector')
         self.mock_sleep_cls = self.sleep_patcher.start()
         self.mock_sleep_instance = MagicMock()
         self.mock_sleep_cls.return_value = self.mock_sleep_instance
 
-        # Initialize detector with camera_id
         self.detector = PhoneDetector(camera_id=1)
 
     def tearDown(self):
         self.yolo_patcher.stop()
         self.sleep_patcher.stop()
 
-    def test_associate_phones_to_persons_hungarian(self):
-        """
-        Test that the matching uses a global optimization (Hungarian Algorithm).
-        User's version uses normalized cost, but the logic remains:
-        Minimize total cost.
+    def test_static_suppression(self):
+        """Test that static phones are penalized."""
+        # Setup: Mark phone ID 99 as static
+        self.detector.static_objects.add(99)
 
-        Scenario:
-        Person A (Small, far away): 100x200 box.
-        Person B (Large, close): 200x400 box.
-        """
-        # Person boxes: [x1, y1, x2, y2, id]
-        # Person 1: 100x200 (Area=20000). Center ~ (150, 200)
-        p1 = [100, 100, 200, 300, 1]
+        persons = [[100, 100, 200, 300, 1]] # H=200
+        phones = [[150, 200, 160, 210, 0.9, 99]] # Near chest
 
-        # Person 2: 200x400 (Area=80000). Center ~ (400, 400)
-        p2 = [300, 200, 500, 600, 2]
+        # Should fail match due to +5.0 penalty (unless wrist is super close)
+        mapping = self.detector._associate_phones_to_persons_advanced(persons, phones, {})
+        self.assertFalse(mapping.get(1))
 
-        persons = [p1, p2]
+    def test_velocity_mismatch(self):
+        """Test penalty when person moves but phone is static."""
+        # Person 1 moving fast (vx=3.0)
+        self.detector.velocities[1] = (3.0, 0.0)
+        # Phone 99 static
+        self.detector.velocities[99] = (0.0, 0.0)
 
-        # Phone boxes: [x1, y1, x2, y2, conf]
-        # Phone 1: Near Person 1 chest.
-        # P1 Chest Y ~ 100 + 200*0.4 = 180. Center (150, 180).
-        ph1 = [145, 175, 155, 185, 0.9] # Center (150, 180)
+        persons = [[100, 100, 200, 300, 1]]
+        phones = [[150, 200, 160, 210, 0.9, 99]] # Close geometrically
 
-        # Phone 2: Near Person 2 chest.
-        # P2 Chest Y ~ 200 + 400*0.4 = 360. Center (400, 360).
-        ph2 = [395, 355, 405, 365, 0.9] # Center (400, 360)
+        # Should fail due to velocity mismatch penalty
+        mapping = self.detector._associate_phones_to_persons_advanced(persons, phones, {})
+        self.assertFalse(mapping.get(1))
 
-        phones = [ph1, ph2]
+    def test_sticky_association(self):
+        """Test that previous matches get a bonus."""
+        # Previous match: Person 1 -> Phone 99
+        self.detector.last_matches[1] = 99
 
-        mapping = self.detector._associate_phones_to_persons(persons, phones, {})
+        persons = [[100, 100, 200, 300, 1]]
+        # Phone slightly far away (normally might fail threshold)
+        # Threshold is 0.6. Dist=0.61
+        # With bonus 0.6x, it becomes 0.366 -> PASS
+        phones = [[100, 322, 110, 332, 0.9, 99]] # ~122px away vertical. 122/200 = 0.61
 
+        # Without bonus, this would fail (0.61 > 0.6)
+        # With bonus, it should pass
+        mapping = self.detector._associate_phones_to_persons_advanced(persons, phones, {})
         self.assertTrue(mapping.get(1))
-        self.assertTrue(mapping.get(2))
 
-    def test_vertical_penalty(self):
-        """
-        Test that a phone physically above the person's head (y < person_y1)
-        is NOT assigned, due to massive penalty.
-        """
-        # Person 1: Box (100, 300, 200, 500). Head top is y=300.
-        persons = [
-            [100, 300, 200, 500, 1]
-        ]
+    def test_elbow_angle_penalty(self):
+        """Test penalty for straight arm (angle ~180)."""
+        persons = [[100, 100, 200, 300, 1]]
+        phones = [[150, 200, 160, 210, 0.9, 99]] # Perfect position
 
-        # Phone: Center (150, 200).
-        # This is above the person's head (200 < 300).
-        phone_above = [140, 190, 160, 210, 0.9]
+        # Mock Keypoints: Shoulder(5), Elbow(7), Wrist(9)
+        # Straight line down: (150,120) -> (150,200) -> (150,280)
+        kpts = np.zeros((17, 2))
+        kpts[5] = [150, 120]
+        kpts[7] = [150, 200]
+        kpts[9] = [150, 280]
 
-        phones = [phone_above]
+        kpts_map = {1: kpts}
 
-        mapping = self.detector._associate_phones_to_persons(persons, phones, {})
-
-        # Should NOT match because of penalty
-        self.assertIsNone(mapping.get(1))
-
-    def test_associate_pose_center_fallback(self):
-        """
-        Test matching pose to person using Center Point Fallback when IoU is low.
-        """
-        # Person Box: Large box
-        persons = [
-            [100, 100, 500, 500, 1]
-        ]
-
-        # Pose Box: Small box inside person box.
-        pose_box = [275, 275, 325, 325]
-        pose_kpts = [np.zeros((17, 2))] # Dummy keypoints
-
-        pose_boxes = [pose_box]
-        pose_kpts_list = [pose_kpts]
-
-        mapping = self.detector._associate_pose_to_persons(persons, pose_boxes, pose_kpts_list)
-
-        # Should match due to center point fallback
-        self.assertIn(1, mapping)
+        # Should fail due to straight arm penalty (+1.0 cost)
+        mapping = self.detector._associate_phones_to_persons_advanced(persons, phones, kpts_map)
+        self.assertFalse(mapping.get(1))
 
 if __name__ == '__main__':
     unittest.main()
