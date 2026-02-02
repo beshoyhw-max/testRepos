@@ -53,13 +53,27 @@ class VideoReader:
                 self.cap = cv2.VideoCapture(self.source)
                 
                 # Optimize for webcam
-                if isinstance(self.source, int) or (isinstance(self.source, str) and self.source.isdigit()):
+                is_webcam = isinstance(self.source, int) or (isinstance(self.source, str) and self.source.isdigit())
+
+                if is_webcam:
                     self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
                     self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
                 
                 # Critical for low latency
                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
                 
+                # Check for file source to throttle FPS
+                self.fps = 30 # Default
+                self.is_file = False
+                if not is_webcam and isinstance(self.source, str) and not self.source.startswith("rtsp"):
+                     # Assume file if not int and not rtsp
+                     # (Could be improved with os.path.exists check but remote URLs exist)
+                     if os.path.exists(self.source):
+                         self.is_file = True
+                         self.fps = self.cap.get(cv2.CAP_PROP_FPS)
+                         if self.fps <= 0: self.fps = 30
+                         print(f"[{self.camera_name}] File detected. FPS: {self.fps}")
+
                 if not self.cap.isOpened():
                     print(f"[{self.camera_name}] Connection failed. Retrying in 5s...")
                     time.sleep(5)
@@ -74,6 +88,11 @@ class VideoReader:
                 if ret:
                     self.frame = frame
                     self.last_read_time = time.time()
+
+                    # Throttle if file
+                    if self.is_file:
+                        time.sleep(1.0 / self.fps)
+
                 else:
                     # Stream lost or end of file
                     print(f"[{self.camera_name}] Stream read failed.")
@@ -105,10 +124,11 @@ class CameraThread(threading.Thread):
         self.shared_pose_model = shared_pose_model
         
         # Initialize independent detector state for this camera
+        # Pass model_instance=None to force loading a fresh private model for tracking
         self.detector = PhoneDetector(
-            model_instance=self.shared_model,
+            model_instance=None,
             pose_model_instance=self.shared_pose_model,
-            lock=model_lock
+            lock=None # No lock needed for private model
         )
         
         self.conf_threshold = conf_threshold
@@ -197,8 +217,7 @@ class CameraManager:
         self.shared_pose_model = None
         
         # Load Model Once
-        print("Loading Shared YOLO Model (Detection)...")
-        self.shared_model = YOLO('yolo26n.pt')
+        # Note: Detection model is now loaded per-camera to support tracking persistence
         print("Loading Shared YOLO Model (Pose)...")
         self.shared_pose_model = YOLO('yolo26n-pose.pt')
         print("Models Loaded.")
@@ -232,7 +251,7 @@ class CameraManager:
         if cam_id in self.cameras:
             return # Already running
             
-        thread = CameraThread(config, self.shared_model, self.shared_pose_model)
+        thread = CameraThread(config, None, self.shared_pose_model)
         thread.start()
         self.cameras[cam_id] = thread
 
