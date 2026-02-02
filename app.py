@@ -218,7 +218,7 @@ elif page_selection == "📸 Evidence Log":
         for idx, img_path in enumerate(image_files):
             with cols[idx % 4]:
                 image = Image.open(img_path)
-                st.image(image, width="stretch")
+                st.image(image, width='stretch')
                 # Parse filename
                 # format: evidence_{cam_name}_{timestamp}.jpg
                 # filename = os.path.basename(img_path)
