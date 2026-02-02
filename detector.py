@@ -82,6 +82,41 @@ class PhoneDetector:
             if len(results) > 0:
                 boxes = results[0].boxes
                 
+                # --- BATCH INFERENCE PREP ---
+                crops_to_infer = []
+                # Store crops mapped by index to reuse later and ensure order
+                valid_crops_indices = set()
+
+                for idx, box in enumerate(boxes):
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+
+                    # --- ZOOM LOGIC ---
+                    h, w, _ = frame.shape
+                    pad = 20
+                    cx1 = max(0, x1 - pad)
+                    cy1 = max(0, y1 - pad)
+                    cx2 = min(w, x2 + pad)
+                    cy2 = min(h, y2 + pad)
+
+                    person_crop = frame[cy1:cy2, cx1:cx2]
+
+                    if person_crop.size > 0:
+                        crops_to_infer.append(person_crop)
+                        valid_crops_indices.add(idx)
+
+                # 2. Second Pass: Run AI on ALL collected persons (Batch Inference)
+                batch_results = []
+                if crops_to_infer:
+                    # Thread-safe inference
+                    if self.lock:
+                        with self.lock:
+                            batch_results = self.model.predict(crops_to_infer, classes=[self.PHONE_CLASS_ID], conf=0.15, verbose=False)
+                    else:
+                        batch_results = self.model.predict(crops_to_infer, classes=[self.PHONE_CLASS_ID], conf=0.15, verbose=False)
+
+                # Create iterator for sequential access
+                batch_results_iter = iter(batch_results)
+
                 for idx, box in enumerate(boxes):
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     p_cx, p_cy = (x1 + x2) / 2, (y1 + y2) / 2
@@ -90,7 +125,7 @@ class PhoneDetector:
                     status = "safe"
                     color = (0, 255, 0) # Green
                     
-                    # --- ZOOM LOGIC ---
+                    # --- ZOOM LOGIC (Re-calculate crop for logic below) ---
                     h, w, _ = frame.shape
                     pad = 20
                     cx1 = max(0, x1 - pad)
@@ -103,18 +138,17 @@ class PhoneDetector:
                     is_candidate = False
                     
                     if person_crop.size > 0:
-                        # 2. Second Pass: Run AI on JUST this person
-                        # Look for PHONE class (67) with lower threshold
-                        
-                        # Thread-safe inference
-                        if self.lock:
-                            with self.lock:
-                                crop_results = self.model.predict(person_crop, classes=[self.PHONE_CLASS_ID], conf=0.15, verbose=False)
-                        else:
-                            crop_results = self.model.predict(person_crop, classes=[self.PHONE_CLASS_ID], conf=0.15, verbose=False)
-                        
-                        if len(crop_results) > 0 and len(crop_results[0].boxes) > 0:
-                            is_candidate = True
+                        # Check if this index was part of the batch
+                        if idx in valid_crops_indices:
+                             # Get result from iterator
+                             try:
+                                 # result_item is a single Results object
+                                 result_item = next(batch_results_iter)
+
+                                 if len(result_item.boxes) > 0:
+                                     is_candidate = True
+                             except StopIteration:
+                                 pass
                     
                     if is_candidate:
                         # --- TEMPORAL CONSISTENCY ---
